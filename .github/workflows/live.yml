@@ -1,0 +1,29 @@
+name: Live bot
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: live-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - run: python live_bot.py
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TOP_N: "30"
+          CONSENSUS: "0.75"
+          INTERVAL: "300"
+          RUN_MINUTES: "345"
+          SEND_FIRST: "1"
