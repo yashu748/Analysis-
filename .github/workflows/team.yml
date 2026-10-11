@@ -18,4 +18,4 @@ jobs:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           TOP_N: "30"
-          CONSENSUS: "0.45"
+          CONSENSUS: "0.65"
