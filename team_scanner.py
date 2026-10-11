@@ -18,7 +18,7 @@ import sol_bot as bot
 TOP_N = int(os.getenv("TOP_N", "30"))
 CONSENSUS = float(os.getenv("CONSENSUS", "0.55"))  # total analysts ka itna % ek taraf ho
 MAX_IN_MSG = 8
-SKIP = ("3L", "3S", "5L", "5S", "UP_", "DOWN_", "BULL", "BEAR")
+SKIP =SKIP = ("3L", "3S", "5L", "5S", "UP_", "DOWN_", "BULL", "BEAR", "USDC_", "FDUSD_", "USDE_", "DAI_", "TUSD_", "USD1_", "PYUSD_", "USDD_")
 TFS = ["15m", "1h", "4h"]
 
 
