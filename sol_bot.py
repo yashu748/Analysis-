@@ -183,7 +183,9 @@ def format_msg(x):
     return "\n".join(lines)
 
 
-def send_telegram(text):
+def     r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                      data={"chat_id": chat, "text": text}, timeout=15)
+    print("Telegram:", r.status_code, r.text[:200]):
     token, chat = os.getenv("TG_TOKEN"), os.getenv("TG_CHAT_ID")
     if not token or not chat:
         print("Telegram keys nahi mili, sirf print kar raha hoon.")
