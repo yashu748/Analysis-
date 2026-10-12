@@ -1,0 +1,22 @@
+name: Smart scanner
+on:
+  schedule:
+    - cron: "3 * * * *"   # har ghante, 1h candle band hone ke baad
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - run: python smart_scanner.py
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TOP_N: "40"
+          TH: "0.45"
