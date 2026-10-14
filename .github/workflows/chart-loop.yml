@@ -1,0 +1,42 @@
+name: Chart loop
+on:
+  
+  
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: chart-loop
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests matplotlib
+      - name: Keep schedule alive
+        run: gh workflow enable chart-loop.yml || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: python chart_loop.py
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TF: "15m"
+          INTERVAL: "180"
+          RUN_MINUTES: "340"
+          MIN_QUOTE_VOL: "1000000"
+          MAX_COINS: "150"
+          MIN_SCORE: "7"
+          MIN_BUY_RATIO: "0.65"
+          COOLDOWN_H: "6"
+          MAX_ALERTS: "5"
+          MIN_RISK_PCT: "0.6"
