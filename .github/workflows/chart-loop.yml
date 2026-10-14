@@ -27,7 +27,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          TF: "15m"
+          TF: "1h"
           GH_TOKEN: ${{ github.token }}
       - run: python chart_loop.py
         env:
@@ -38,8 +38,8 @@ jobs:
           RUN_MINUTES: "340"
           MIN_QUOTE_VOL: "1000000"
           MAX_COINS: "150"
-          MIN_SCORE: "4"
-          MIN_BUY_RATIO: "0.52"
+          MIN_SCORE: "6"
+          MIN_BUY_RATIO: "0.60"
           COOLDOWN_H: "6"
-          MAX_ALERTS: "5"
+          MAX_ALERTS: "10"
           MIN_RISK_PCT: "0.6"
