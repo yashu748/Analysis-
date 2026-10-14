@@ -29,6 +29,7 @@ import buy_pressure_scanner as bp  # noqa: E402
 MAX_ALERTS = int(os.getenv("MAX_ALERTS", "5"))
 STATE_FILE = "alert_state_chart.json"
 CHART_BARS = 80
+MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", "0.6")) / 100   # SL isse chhota ho to fees kha jati hain
 
 
 def pivots(h, l, w=3):
@@ -43,7 +44,7 @@ def pivots(h, l, w=3):
 
 def load_candles(pair):
     raw = bot.get("/spot/candlesticks",
-                  {"currency_pair": pair, "interval": "1h", "limit": 200})[:-1]
+                  {"currency_pair": pair, "interval": bp.TF, "limit": 200})[:-1]
     o = [bp.f(x[5]) for x in raw]
     h = [bp.f(x[3]) for x in raw]
     l = [bp.f(x[4]) for x in raw]
@@ -112,7 +113,7 @@ def make_chart(pair, o, h, l, c, v, entry, lv, score, path):
     lo = min(min(l[s:]), lv["sl"]) * 0.995
     hi = max(max(h[s:]), lv["t2"]) * 1.005
     ax.set_ylim(lo, hi)
-    ax.set_title(f"{pair}  1h   setup score {score:.0f}/8", color=fg, fontsize=11, loc="left")
+    ax.set_title(f"{pair}  {bp.TF}   setup score {score:.0f}/8", color=fg, fontsize=11, loc="left")
     ax.legend(loc="upper left", facecolor=bg, edgecolor="#2a2f3a", labelcolor=fg, fontsize=8)
     ax.grid(color="#1d222c", linewidth=0.5)
     axv.grid(color="#1d222c", linewidth=0.5)
@@ -218,6 +219,9 @@ def main():
             if not lv:
                 print(f"{y['pair']}: resistance paas, skip")
                 continue
+            if (entry - lv["sl"]) / entry < MIN_RISK_PCT:
+                print(f"{y['pair']}: SL bahut chhota (fees ka asar), skip")
+                continue
             path = f"/tmp/{y['pair']}.png"
             make_chart(y["pair"], o, h, l, c, v, entry, lv, y["score"], path)
             cap = caption(y, lv, entry)
@@ -231,8 +235,9 @@ def main():
         time.sleep(0.3)
     save_state(state)
     print(f"Alerts bheje: {sent}")
+    return sent
 
 
 if __name__ == "__main__":
     main()
-  
+ 
