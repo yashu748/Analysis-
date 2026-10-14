@@ -1,0 +1,39 @@
+name: Chart scanner
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # har 15 minute
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: chart-scanner
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests matplotlib
+      - run: python chart_scanner.py
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          MIN_QUOTE_VOL: "1000000"
+          MAX_COINS: "150"
+          MIN_SCORE: "7"
+          MIN_BUY_RATIO: "0.65"
+          COOLDOWN_H: "6"
+          MAX_ALERTS: "15"
+      - name: Save alert state
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add alert_state_chart.json || true
+          git diff --cached --quiet || (git commit -m "update alert state" && git push)
