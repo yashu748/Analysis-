@@ -3,7 +3,7 @@ Buying-pressure scanner: Gate.io ke SAARE USDT spot coins (liquid wale) scan kar
 aur jin coins me khareedari (buying) zyada hai unka alert SL + targets ke saath bhejta hai.
 sol_bot.py aur team_scanner.py ke saath ek hi folder me rakho.
 
-Stage A (sasta, har coin): 1h candles se volume spike, money flow (CMF), OBV, trend (EMA20/50)
+Stage A (sasta, har coin): TF candles (default 15m) se volume spike, money flow (CMF), OBV, trend (EMA20/50)
 Stage B (top coins): asli taker buy ratio (recent trades) + order book bid/ask imbalance
 Alert tabhi jab score kaafi ho AND taker buying >= MIN_BUY_RATIO.
 Late/pump ho chuke coins (extended) aur illiquid coins skip hote hain.
@@ -27,6 +27,7 @@ MIN_BUY_RATIO = float(os.getenv("MIN_BUY_RATIO", "0.58"))
 COOLDOWN_H = float(os.getenv("COOLDOWN_H", "6"))
 MAX_ALERTS = int(os.getenv("MAX_ALERTS", "6"))
 STATE_FILE = "alert_state.json"
+TF = os.getenv("TF", "1h")   # candle timeframe: 5m / 15m / 1h
 STABLES = {"USDC", "FDUSD", "USDE", "DAI", "TUSD", "USD1", "PYUSD", "USDD", "USDT",
            "EUR", "EURI", "AEUR", "BUSD", "USDP", "GUSD", "XUSD", "RLUSD", "USDG"}
 SL_ATR, T1_R, T2_R = 1.5, 1.5, 3.0
@@ -63,7 +64,7 @@ def universe():
 # ------------------------------------------------------------ stage A
 def stage_a(r):
     raw = bot.get("/spot/candlesticks",
-                  {"currency_pair": r["pair"], "interval": "1h", "limit": 100})[:-1]
+                  {"currency_pair": r["pair"], "interval": TF, "limit": 100})[:-1]
     if len(raw) < 60:
         return None
     qv = [f(x[1]) for x in raw]
