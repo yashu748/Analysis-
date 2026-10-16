@@ -30,7 +30,7 @@ MAX_ALERTS = int(os.getenv("MAX_ALERTS", "5"))
 STATE_FILE = "alert_state_chart.json"
 CHART_BARS = 80
 MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", "0.6")) / 100   # SL isse chhota ho to fees kha jati hain
-
+MIN_CONFIRM = int(os.getenv("MIN_CONFIRM", "4"))
 
 def pivots(h, l, w=3):
     ph, pl = [], []
