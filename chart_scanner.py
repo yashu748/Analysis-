@@ -196,9 +196,9 @@ def caption(x, lv, entry):
         f"T1 {lv['t1']:.{d}f}  ({lv['rr1']:.1f}R)  |  T2 {lv['t2']:.{d}f}  ({lv['rr2']:.1f}R)",
         "",
         f"Kyun: taker buying {x['buy_ratio'] * 100:.0f}%, book bids {x['imb'] * 100:.0f}%, "
-                f"volume {x['spike']:.1f}x, CMF {x['cmf']:+.2f}, EMA20>EMA50"
+        f"volume {x['spike']:.1f}x, CMF {x['cmf']:+.2f}, EMA20>EMA50",
         f"Indicators: {x.get('ind', '')}",
-    
+    ]
     if lv["res"]:
         lines.append("Upar resistance: " + ", ".join(f"{r:.{d}f}" for r in lv["res"]))
     if lv["support"]:
