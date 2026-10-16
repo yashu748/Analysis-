@@ -51,7 +51,71 @@ def load_candles(pair):
     c = [bp.f(x[2]) for x in raw]
     v = [bp.f(x[6]) for x in raw]
     return o, h, l, c, v
+def ema_list(x, n):
+    k = 2 / (n + 1)
+    out = [x[0]]
+    for p in x[1:]:
+        out.append(p * k + out[-1] * (1 - k))
+    return out
 
+
+def rsi_last(c, n=14):
+    g = ls = 0.0
+    for i in range(1, n + 1):
+        d = c[i] - c[i - 1]
+        g += max(d, 0)
+        ls += max(-d, 0)
+    g, ls = g / n, ls / n
+    for i in range(n + 1, len(c)):
+        d = c[i] - c[i - 1]
+        g = (g * (n - 1) + max(d, 0)) / n
+        ls = (ls * (n - 1) + max(-d, 0)) / n
+    return 100.0 if ls == 0 else 100 - 100 / (1 + g / ls)
+
+
+def macd_state(c):
+    e12, e26 = ema_list(c, 12), ema_list(c, 26)
+    m = [a - b for a, b in zip(e12, e26)]
+    sg = ema_list(m, 9)
+    hist = [a - b for a, b in zip(m, sg)]
+    return m[-1] > sg[-1] and hist[-1] > hist[-2]
+
+
+def supertrend_up(h, l, c, n=10, mult=3.0):
+    tr = [h[0] - l[0]] + [max(h[i] - l[i], abs(h[i] - c[i - 1]),
+                              abs(l[i] - c[i - 1])) for i in range(1, len(c))]
+    atr = [tr[0]]
+    for i in range(1, len(c)):
+        atr.append((atr[-1] * (n - 1) + tr[i]) / n)
+    fu = fl = 0.0
+    up = True
+    for i in range(len(c)):
+        hl = (h[i] + l[i]) / 2
+        bu, bl = hl + mult * atr[i], hl - mult * atr[i]
+        if i == 0:
+            fu, fl = bu, bl
+            continue
+        fu = bu if (bu < fu or c[i - 1] > fu) else fu
+        fl = bl if (bl > fl or c[i - 1] < fl) else fl
+        if up and c[i] < fl:
+            up = False
+        elif not up and c[i] > fu:
+            up = True
+    return up
+
+
+def confirm(o, h, l, c, v):
+    e20, e50 = ema_list(c, 20)[-1], ema_list(c, 50)[-1]
+    r = rsi_last(c)
+    vavg = sum(v[-21:-1]) / 20
+    checks = {
+        "EMA": c[-1] > e20 > e50,
+        "Supertrend": supertrend_up(h, l, c),
+        "RSI 50-70": 50 <= r <= 70,
+        "MACD": macd_state(c),
+        "Volume": v[-1] > 1.2 * vavg,
+    }
+    return sum(checks.values()), checks, r
 
 def plan_levels(entry, atr, h, l):
     """Structure-based SL / T1 / T2. None return = setup skip."""
