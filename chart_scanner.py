@@ -277,6 +277,10 @@ def main():
             continue
         try:
             o, h, l, c, v = load_candles(y["pair"])
+            conf, checks, rsi_v = confirm(o, h, l, c, v)
+            if conf < MIN_CONFIRM:
+                continue
+            y["ind"] = " ".join(("✅" if ok else "❌") + k for k, ok in checks.items())
             ask = y["ask"]
             entry = ask if ask and abs(ask / c[-1] - 1) < 0.03 else c[-1]
             lv = plan_levels(entry, y["atr"], h, l)
