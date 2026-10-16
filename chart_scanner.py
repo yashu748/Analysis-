@@ -58,7 +58,7 @@ def plan_levels(entry, atr, h, l):
     ph, pl = pivots(h[-150:], l[-150:])
     swing = min(l[-20:])
     risk_struct = entry - (swing - 0.2 * atr)
-    risk = min(max(risk_struct, 1.0 * atr), 3.0 * atr)
+    risk = min(max(risk_struct, 1.5 * atr), 3.5 * atr)
     sl = entry - risk
     res = sorted({p for p in ph if p > entry * 1.002})
     if any(entry < r < entry + 1.0 * risk for r in res):
