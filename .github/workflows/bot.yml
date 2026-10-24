@@ -1,0 +1,22 @@
+name: Trading Alert Bot
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"    # har 5 minute (GitHub isse kam allow nahi karta)
+  workflow_dispatch:          # manual run ka button
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - run: python futures_bot.py
+        env:
+          RUN_ONCE: "1"
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
