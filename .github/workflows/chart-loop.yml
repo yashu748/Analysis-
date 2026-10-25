@@ -1,15 +1,11 @@
-name: Chart Loop Workflow
-
-on:
-  workflow_dispatch: {}
-
-permissions:
-  contents: write
-  actions: write
+name: on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */5 * * *"
 
 concurrency:
   group: chart-loop
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:  # <--- Yahan ek job ID add karni padegi
