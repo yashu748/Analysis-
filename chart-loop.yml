@@ -1,6 +1,7 @@
 name: Chart scanner
 on:
-
+  schedule:
+    - cron: "*/15 * * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -13,7 +14,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,6 +31,10 @@ jobs:
           MIN_BUY_RATIO: "0.60"
           COOLDOWN_H: "6"
           MAX_ALERTS: "10"
+          MAX_PAT_ALERTS: "5"
+          PAT_BREAKOUT_ONLY: "1"
+          MIN_CONFIRM_PAT: "3"
+          LEVERAGE: "10"
       - name: Save alert state
         run: |
           git config user.name "github-actions"
