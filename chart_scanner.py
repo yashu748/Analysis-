@@ -615,8 +615,7 @@ def caption(x, lv, entry, pats=None):
         lines.append("Upar resistance: " + ", ".join(f"{r:.{d}f}" for r in lv["res"]))
     if lv["support"]:
         lines.append(f"Neeche support: {lv['support']:.{d}f}")
-    if pats:
-        lines.append(pattern_text(pats, d))
+    lines.append(pattern_text(pats, d) if pats else "\n📐 Patterns: koi clear pattern nahi mila")
     lines += ["", "T1 par 50% book, SL entry par. Alert hai, advice nahi. SL zaroor lagao."]
     return "\n".join(lines)[:1020]
 
