@@ -38,5 +38,9 @@ jobs:
           MIN_SCORE: "6"
           MIN_BUY_RATIO: "0.60"
           COOLDOWN_H: "6"
-          MAX_ALERTS: "10"
+          
+          MAX_PAT_ALERTS: "5"
+          PAT_BREAKOUT_ONLY: "1"
+          MIN_CONFIRM_PAT: "3"
+          LEVERAGE: "10"
           MIN_RISK_PCT: "0.6"
