@@ -12,11 +12,13 @@ Pipeline:
  3) Resistance bilkul upar ho to setup skip (R:R kharab)
  4) Saare patterns detect (Double/Triple Top-Bottom, H&S, Triangles, Wedges, Flags,
     Cup&Handle, Channels, Candlesticks). Bearish breakdown ho chuka ho to long skip.
- 5) Chart image (candles, EMA 9/26 cross arrows, Entry/SL/T1/T2 boxes, Liq line,
+ 5) Alag se pattern scan: bullish breakout -> LONG, bearish breakdown -> SHORT alert
+ 6) Chart image (candles, EMA 9/26 cross arrows, Entry/SL/T1/T2 boxes, Liq line,
     volume, RSI, patterns) + caption Telegram par
 
 ENV (optional): MIN_SCORE (6), MIN_BUY_RATIO (0.58), COOLDOWN_H (6), MAX_ALERTS (5),
-                LEVERAGE (30), PATTERN_ONLY (1 = sirf bullish pattern wale alerts)
+                LEVERAGE (30), PATTERN_ONLY (1 = buy-pressure alerts me bhi bullish pattern zaroori),
+                MAX_PAT_ALERTS (5), MIN_CONFIRM_PAT (3), PAT_BREAKOUT_ONLY (1), PAT_SCAN_LIMIT (200)
 Ye rule-based analysis hai, live AI model nahi. Advice nahi.
 """
 import json
@@ -38,6 +40,10 @@ MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", "0.6")) / 100   # SL isse chhota 
 MIN_CONFIRM = int(os.getenv("MIN_CONFIRM", "4"))
 LEVERAGE = float(os.getenv("LEVERAGE", "30"))                  # chart par Liq line ke liye
 PATTERN_ONLY = os.getenv("PATTERN_ONLY", "0") == "1"
+MAX_PAT_ALERTS = int(os.getenv("MAX_PAT_ALERTS", "5"))        # pattern wale LONG+SHORT alerts
+MIN_CONFIRM_PAT = int(os.getenv("MIN_CONFIRM_PAT", "3"))      # pattern trade ke liye indicator confirm
+PAT_BREAKOUT_ONLY = os.getenv("PAT_BREAKOUT_ONLY", "1") == "1"  # 1 = sirf breakout ho chuke pattern
+PAT_SCAN_LIMIT = int(os.getenv("PAT_SCAN_LIMIT", "200"))      # kitne coins pattern ke liye scan
 
 # ================= PATTERN DETECTION =================
 def _pivots(h, l, order=3):
@@ -494,7 +500,8 @@ def plan_levels(entry, atr, h, l):
                 rr1=(t1 - entry) / risk, rr2=(t2 - entry) / risk)
 
 
-def make_chart(pair, o, h, l, c, v, entry, lv, score, path, pats=None):
+def make_chart(pair, o, h, l, c, v, entry, lv, score, path, pats=None,
+               side="LONG", score_txt=None):
     n = len(c)
     s = max(0, n - CHART_BARS)
     cnt = n - s
@@ -552,7 +559,7 @@ def make_chart(pair, o, h, l, c, v, entry, lv, score, path, pats=None):
     right = cnt + 3
     ax.fill_between([cnt - 1, right], entry, lv["t2"], color=green, alpha=0.15)
     ax.fill_between([cnt - 1, right], lv["sl"], entry, color=red, alpha=0.15)
-    liq = entry * (1 - 0.99 / LEVERAGE)
+    liq = entry * (1 - 0.99 / LEVERAGE) if side == "LONG" else entry * (1 + 0.99 / LEVERAGE)
     for y, col, name, ls in ((entry, blue, "Entry", "--"),
                              (lv["sl"], red, "SL", "-"),
                              (lv["t1"], green, "T1", "-"),
@@ -568,10 +575,10 @@ def make_chart(pair, o, h, l, c, v, entry, lv, score, path, pats=None):
         draw_pattern(ax, pats)
 
     ax.set_xlim(-1, right + 16)
-    lo = min(min(l[s:]), lv["sl"], liq) * 0.997
-    hi = max(max(h[s:]), lv["t2"]) * 1.005
+    lo = min(min(l[s:]), lv["sl"], lv["t2"], liq) * 0.997
+    hi = max(max(h[s:]), lv["sl"], lv["t2"], liq) * 1.005
     ax.set_ylim(lo, hi)
-    ax.set_title(f"{pair}  {bp.TF}   setup score {score:.0f}/8   "
+    ax.set_title(f"{pair}  {bp.TF}  {side}   {score_txt or f'setup score {score:.0f}/8'}   "
                  f"T1 {lv['rr1']:.1f}R  T2 {lv['rr2']:.1f}R",
                  color=fg, fontsize=11, loc="left")
     ax.legend(loc="upper left", facecolor=bg, edgecolor="#2a2f3a", labelcolor=fg, fontsize=8)
@@ -612,6 +619,150 @@ def caption(x, lv, entry, pats=None):
         lines.append(pattern_text(pats, d))
     lines += ["", "T1 par 50% book, SL entry par. Alert hai, advice nahi. SL zaroor lagao."]
     return "\n".join(lines)[:1020]
+
+
+def atr_calc(h, l, c, n=14):
+    tr = [max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1]))
+          for i in range(1, len(c))]
+    return sum(tr[-n:]) / n
+
+
+def confirm_short(o, h, l, c, v):
+    e20, e50 = ema_list(c, 20)[-1], ema_list(c, 50)[-1]
+    r = rsi_last(c)
+    vavg = sum(v[-21:-1]) / 20
+    e12, e26 = ema_list(c, 12), ema_list(c, 26)
+    m = [a - b for a, b in zip(e12, e26)]
+    sg = ema_list(m, 9)
+    hist = [a - b for a, b in zip(m, sg)]
+    checks = {
+        "EMA": c[-1] < e20 < e50,
+        "Supertrend": not supertrend_up(h, l, c),
+        "RSI 30-50": 30 <= r <= 50,
+        "MACD": m[-1] < sg[-1] and hist[-1] < hist[-2],
+        "Volume": v[-1] > 1.2 * vavg,
+    }
+    return sum(checks.values()), checks, r
+
+
+def plan_levels_short(entry, atr, h, l):
+    """SHORT ke liye: SL swing high ke upar, targets neeche ke supports par.
+    lv['res'] = neeche ke support levels, lv['support'] = upar ka nearest resistance."""
+    ph, pl = pivots(h[-150:], l[-150:])
+    swing = max(h[-20:])
+    risk_struct = (swing + 0.2 * atr) - entry
+    risk = min(max(risk_struct, 1.5 * atr), 3.5 * atr)
+    sl = entry + risk
+    sup = sorted({p for p in pl if p < entry * 0.998}, reverse=True)
+    if any(entry - 1.0 * risk < s_ < entry for s_ in sup):
+        return None  # support bilkul paas, R:R kharab
+    cands = [s_ for s_ in sup if s_ <= entry - 1.2 * risk]
+    t1 = cands[0] if cands and cands[0] >= entry - 3 * risk else entry - 1.5 * risk
+    later = [s_ for s_ in cands if s_ < t1 * 0.998 and s_ >= entry - 6 * risk]
+    t2 = later[0] if later else entry - 3 * risk
+    if t2 >= t1:
+        t2 = t1 - 1.5 * risk
+    if min(t1, t2) <= entry * 0.05:
+        return None  # target zero ke paas, short ka matlab nahi
+    above = sorted([p for p in ph if p > entry])
+    return dict(sl=sl, t1=t1, t2=t2, risk=risk, res=sup[:3],
+                support=above[0] if above else None,
+                rr1=(entry - t1) / risk, rr2=(entry - t2) / risk)
+
+
+def caption_pat(pair, side, lv, entry, ind, pats, chg):
+    d = bp.dec(entry)
+    risk_pct = abs(entry - lv["sl"]) / entry * 100
+    sg = "-" if side == "LONG" else "+"
+    main = next((p for p in pats if p["kind"] == "chart"), None)
+    lines = [
+        f"{pair}  {side} setup  (pattern: {main['name'] if main else '-'}, 24h {chg:+.1f}%)",
+        f"Entry ~{entry:.{d}f}",
+        f"SL {lv['sl']:.{d}f}  ({sg}{risk_pct:.1f}%)",
+        f"T1 {lv['t1']:.{d}f}  ({lv['rr1']:.1f}R)  |  T2 {lv['t2']:.{d}f}  ({lv['rr2']:.1f}R)",
+        "",
+        f"Indicators: {ind}",
+    ]
+    if side == "LONG":
+        if lv["res"]:
+            lines.append("Upar resistance: " + ", ".join(f"{r:.{d}f}" for r in lv["res"]))
+        if lv["support"]:
+            lines.append(f"Neeche support: {lv['support']:.{d}f}")
+    else:
+        if lv["res"]:
+            lines.append("Neeche support: " + ", ".join(f"{r:.{d}f}" for r in lv["res"]))
+        if lv["support"]:
+            lines.append(f"Upar resistance: {lv['support']:.{d}f}")
+    lines.append(pattern_text(pats, d))
+    tail = "T1 par 50% book, SL entry par. Alert hai, advice nahi. SL zaroor lagao."
+    if side == "SHORT":
+        tail += " Short ke liye futures/perp chahiye."
+    lines += ["", tail]
+    return "\n".join(lines)[:1020]
+
+
+def pattern_trades(uni, state, now, skip_pairs):
+    """Saare coins par pattern scan: bullish breakout -> LONG, bearish breakdown -> SHORT."""
+    sent = 0
+    for r in uni[:PAT_SCAN_LIMIT]:
+        if sent >= MAX_PAT_ALERTS:
+            break
+        pair = r["pair"]
+        if pair in skip_pairs:
+            continue
+        try:
+            o, h, l, c, v = load_candles(pair)
+            time.sleep(0.12)
+            if len(c) < 80:
+                continue
+            pats = detect_all(o, h, l, c, max(0, len(c) - CHART_BARS))
+            charts = [p for p in pats if p["kind"] == "chart"]
+            if PAT_BREAKOUT_ONLY:
+                charts = [p for p in charts if p["broke"]]
+            if not charts or charts[0]["bias"] == "NEUTRAL":
+                continue
+            side = "LONG" if charts[0]["bias"] == "BULL" else "SHORT"
+            opp = "BEAR" if side == "LONG" else "BULL"
+            if any(p["kind"] == "chart" and p["bias"] == opp and p["broke"] for p in pats):
+                continue  # ulte pattern ka breakout bhi hai, confusion
+            key = f"{pair}|{side}"
+            if now - state.get(key, 0) < bp.COOLDOWN_H * 3600:
+                continue
+            if side == "LONG" and now - state.get(pair, 0) < bp.COOLDOWN_H * 3600:
+                continue
+            if side == "LONG":
+                conf, checks, _ = confirm(o, h, l, c, v)
+            else:
+                conf, checks, _ = confirm_short(o, h, l, c, v)
+            if conf < MIN_CONFIRM_PAT:
+                continue
+            entry, a = c[-1], atr_calc(h, l, c)
+            lv = plan_levels(entry, a, h, l) if side == "LONG" else plan_levels_short(entry, a, h, l)
+            if not lv:
+                print(f"{pair}: {side} level paas me, skip")
+                continue
+            if abs(entry - lv["sl"]) / entry < MIN_RISK_PCT:
+                continue
+            tg = charts[0].get("target")      # pattern ka measured target T2 bana do agar sahi ho
+            if tg:
+                if side == "LONG" and lv["t1"] * 1.002 < tg <= entry + 8 * lv["risk"]:
+                    lv["t2"], lv["rr2"] = tg, (tg - entry) / lv["risk"]
+                if side == "SHORT" and entry - 8 * lv["risk"] <= tg < lv["t1"] * 0.998 and tg > 0:
+                    lv["t2"], lv["rr2"] = tg, (entry - tg) / lv["risk"]
+            ind = " ".join(("✅" if ok else "❌") + k for k, ok in checks.items())
+            chg = (c[-1] / c[-25] - 1) * 100 if len(c) > 25 else 0.0
+            path = f"/tmp/{pair}_{side}.png"
+            make_chart(pair, o, h, l, c, v, entry, lv, conf, path, pats,
+                       side=side, score_txt=f"confirm {conf}/5")
+            cap = caption_pat(pair, side, lv, entry, ind, pats, chg)
+            if not send_photo(path, cap):
+                bot.send_telegram(cap)
+            state[key] = now
+            sent += 1
+            print(f"{pair}: {side} alert ({charts[0]['name']})")
+        except Exception as e:
+            print(f"{pair}: pattern trade fail ({repr(e)[:150]})")
+    return sent
 
 
 def send_photo(path, cap):
@@ -678,6 +829,7 @@ def main():
     cands.sort(key=lambda y: (y["score"], y["buy_ratio"]), reverse=True)
 
     state, now, sent = load_state(), time.time(), 0
+    sent_pairs = set()
     for y in cands:
         if sent >= MAX_ALERTS:
             break
@@ -713,10 +865,16 @@ def main():
             if not ok:
                 bot.send_telegram(cap)       # photo na jaye to text alert
             state[y["pair"]] = now
+            sent_pairs.add(y["pair"])
             sent += 1
         except Exception as e:
             print(f"{y['pair']}: alert fail ({repr(e)[:150]})")
         time.sleep(0.3)
+    # ---- pattern based LONG + SHORT alerts (saare coins)
+    try:
+        sent += pattern_trades(uni, state, now, sent_pairs)
+    except Exception as e:
+        print("pattern_trades fail:", repr(e)[:150])
     save_state(state)
     print(f"Alerts bheje: {sent}")
     return sent
