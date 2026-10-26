@@ -18,7 +18,8 @@ Pipeline:
 
 ENV (optional): MIN_SCORE (6), MIN_BUY_RATIO (0.58), COOLDOWN_H (6), MAX_ALERTS (5),
                 LEVERAGE (30), PATTERN_ONLY (1 = buy-pressure alerts me bhi bullish pattern zaroori),
-                MAX_PAT_ALERTS (5), MIN_CONFIRM_PAT (3), PAT_BREAKOUT_ONLY (1), PAT_SCAN_LIMIT (200)
+                MAX_PAT_ALERTS (5), MIN_CONFIRM_PAT (3), PAT_BREAKOUT_ONLY (1), PAT_SCAN_LIMIT (200),
+                HTF_FILTER (1), BTC_FILTER (1), EXT_ATR (2.5)  <- ye 3 fail-trades kam karte hain
 Ye rule-based analysis hai, live AI model nahi. Advice nahi.
 """
 import json
@@ -44,6 +45,9 @@ MAX_PAT_ALERTS = int(os.getenv("MAX_PAT_ALERTS", "5"))        # pattern wale LON
 MIN_CONFIRM_PAT = int(os.getenv("MIN_CONFIRM_PAT", "3"))      # pattern trade ke liye indicator confirm
 PAT_BREAKOUT_ONLY = os.getenv("PAT_BREAKOUT_ONLY", "1") == "1"  # 1 = sirf breakout ho chuke pattern
 PAT_SCAN_LIMIT = int(os.getenv("PAT_SCAN_LIMIT", "200"))      # kitne coins pattern ke liye scan
+HTF_FILTER = os.getenv("HTF_FILTER", "1") == "1"              # 4h trend ulta ho to alert nahi
+BTC_FILTER = os.getenv("BTC_FILTER", "1") == "1"              # BTC 1h trend ulta ho to alert nahi
+EXT_ATR = float(os.getenv("EXT_ATR", "2.5"))                  # price EMA20 se itne ATR door = late entry, skip
 
 # ================= PATTERN DETECTION =================
 def _pivots(h, l, order=3):
@@ -380,9 +384,9 @@ def pivots(h, l, w=3):
     return ph, pl
 
 
-def load_candles(pair):
+def load_candles(pair, interval=None):
     raw = bot.get("/spot/candlesticks",
-                  {"currency_pair": pair, "interval": bp.TF, "limit": 200})[:-1]
+                  {"currency_pair": pair, "interval": interval or bp.TF, "limit": 200})[:-1]
     o = [bp.f(x[5]) for x in raw]
     h = [bp.f(x[3]) for x in raw]
     l = [bp.f(x[4]) for x in raw]
@@ -669,6 +673,37 @@ def plan_levels_short(entry, atr, h, l):
                 rr1=(entry - t1) / risk, rr2=(entry - t2) / risk)
 
 
+_ctx = {}
+
+
+def _trend(pair, interval):
+    """+1 uptrend, -1 downtrend, 0 sideways, None data nahi mila."""
+    key = (pair, interval)
+    if key not in _ctx:
+        try:
+            _, _, _, c, _ = load_candles(pair, interval)
+            e20, e50 = ema_list(c, 20)[-1], ema_list(c, 50)[-1]
+            _ctx[key] = 1 if c[-1] > e20 > e50 else (-1 if c[-1] < e20 < e50 else 0)
+            time.sleep(0.1)
+        except Exception:
+            _ctx[key] = None
+    return _ctx[key]
+
+
+def trade_filters(pair, side, h, l, c):
+    """Fail hone wale trades kam karne ke filters. (ok, reason) return."""
+    want = 1 if side == "LONG" else -1
+    if HTF_FILTER and _trend(pair, "4h") == -want:
+        return False, "4h trend ulta hai"
+    if BTC_FILTER and _trend("BTC_USDT", "1h") == -want:
+        return False, "BTC trend ulta hai"
+    if EXT_ATR:
+        a, e20 = atr_calc(h, l, c), ema_list(c, 20)[-1]
+        if a > 0 and abs(c[-1] - e20) > EXT_ATR * a:
+            return False, "price EMA20 se bahut door (late entry)"
+    return True, ""
+
+
 def caption_pat(pair, side, lv, entry, ind, pats, chg):
     d = bp.dec(entry)
     risk_pct = abs(entry - lv["sl"]) / entry * 100
@@ -735,6 +770,10 @@ def pattern_trades(uni, state, now, skip_pairs):
                 conf, checks, _ = confirm_short(o, h, l, c, v)
             if conf < MIN_CONFIRM_PAT:
                 continue
+            ok_f, why = trade_filters(pair, side, h, l, c)
+            if not ok_f:
+                print(f"{pair}: {side} skip ({why})")
+                continue
             entry, a = c[-1], atr_calc(h, l, c)
             lv = plan_levels(entry, a, h, l) if side == "LONG" else plan_levels_short(entry, a, h, l)
             if not lv:
@@ -797,6 +836,7 @@ def save_state(state):
 
 
 def main():
+    _ctx.clear()
     uni, passed = bp.universe()
     print(f"Universe: {passed} coins liquidity paas, {len(uni)} scan honge")
     stage = []
@@ -853,6 +893,10 @@ def main():
             print(f"{y['pair']}: patterns = {[p['name'] for p in pats]}")
             if bear_breakout(pats):
                 print(f"{y['pair']}: bearish pattern breakdown, long skip")
+                continue
+            ok_f, why = trade_filters(y["pair"], "LONG", h, l, c)
+            if not ok_f:
+                print(f"{y['pair']}: LONG skip ({why})")
                 continue
             if PATTERN_ONLY and not has_bull_chart(pats):
                 print(f"{y['pair']}: bullish pattern nahi, skip (PATTERN_ONLY)")
