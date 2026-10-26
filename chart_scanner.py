@@ -16,7 +16,7 @@ Pipeline:
  6) Chart image (candles, EMA 9/26 cross arrows, Entry/SL/T1/T2 boxes, Liq line,
     volume, RSI, patterns) + caption Telegram par
 
-ENV (optional): MIN_SCORE (6), MIN_BUY_RATIO (0.58), COOLDOWN_H (6), MAX_ALERTS (5),
+ENV (optional): SCAN_TF (1h), MIN_SCORE (6), MIN_BUY_RATIO (0.58), COOLDOWN_H (6), MAX_ALERTS (5),
                 LEVERAGE (30), PATTERN_ONLY (1 = buy-pressure alerts me bhi bullish pattern zaroori),
                 MAX_PAT_ALERTS (5), MIN_CONFIRM_PAT (3), PAT_BREAKOUT_ONLY (1), PAT_SCAN_LIMIT (200),
                 HTF_FILTER (1), BTC_FILTER (1), EXT_ATR (2.5)  <- ye 3 fail-trades kam karte hain
@@ -33,6 +33,10 @@ import requests  # noqa: E402
 
 import sol_bot as bot  # noqa: E402
 import buy_pressure_scanner as bp  # noqa: E402
+
+# Trade timeframe: default 1h (15m me fail zyada the). Env SCAN_TF se badal sakte ho.
+# Ye buy_pressure_scanner ke TF ko bhi override karta hai, to screening + chart + levels sab 1h par.
+bp.TF = os.getenv("SCAN_TF", "1h")
 
 MAX_ALERTS = int(os.getenv("MAX_ALERTS", "5"))
 STATE_FILE = "alert_state_chart.json"
