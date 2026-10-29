@@ -1,0 +1,24 @@
+pip install requests pandas matplotlible:
+    - cron: "0 */6 * * *"   # har 6 ghante mein naya loop start
+  workflow_dispatch:         # manual start button
+
+concurrency:
+  group: chart-scanner
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests pandas matplotlib
+      - run: python chart_scanner.py
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MAX_RUNTIME: "20400"   # 5 ghante 40 minute, phir band
+
