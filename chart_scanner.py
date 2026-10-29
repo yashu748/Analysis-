@@ -1,4 +1,7 @@
-"""
+def main():
+    """chart_loop.py isko call karta hai: ek baar poora scan"""
+    scan()
+      """
 chart_scanner.py  (single file)
 - NORMAL alert: 1D + 4h + 1h trend must agree, entry trigger on 1h. Chart = 1h.
 - PUMP alert: 5m volume spike + breakout (catches fast moves like Q/USDT). Chart = 1h.
