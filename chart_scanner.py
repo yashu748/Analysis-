@@ -31,6 +31,7 @@ PUMP_MOVE_PCT = 3.0       # min move in last 3 candles (5m)
 PUMP_LATE_PCT = 15.0      # skip if already up this much in last 1h (late entry)
 COOLDOWN = {"NORMAL": 4 * 3600, "PUMP": 3600}
 RUN_ONCE = os.getenv("RUN_ONCE") == "1"
+MAX_RUNTIME = int(os.getenv("MAX_RUNTIME", "0"))  # seconds, 0 = run forever
 
 last_sent = {}
 
@@ -286,6 +287,7 @@ def scan():
 
 
 if __name__ == "__main__":
+    begin = time.time()
     while True:
         start = time.time()
         try:
@@ -294,4 +296,7 @@ if __name__ == "__main__":
             print("scan error", e)
         if RUN_ONCE:
             break
+        if MAX_RUNTIME and time.time() - begin > MAX_RUNTIME:
+            break
         time.sleep(max(10, LOOP_SECONDS - (time.time() - start)))
+          
