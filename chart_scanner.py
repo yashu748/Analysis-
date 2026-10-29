@@ -10,6 +10,7 @@ Needs: pip install requests pandas matplotlib
 """
 import os
 import io
+import json
 import time
 import requests
 import pandas as pd
@@ -33,7 +34,29 @@ COOLDOWN = {"NORMAL": 4 * 3600, "PUMP": 3600}
 RUN_ONCE = os.getenv("RUN_ONCE") == "1"
 MAX_RUNTIME = int(os.getenv("MAX_RUNTIME", "0"))  # seconds, 0 = run forever
 
-last_sent = {}
+STATE_FILE = "alert_state.json"  # cooldown yaad rakhne ke liye (chart_loop.py git push karta hai)
+
+
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            raw = json.load(f)
+        return {tuple(k.split("|", 1)): v for k, v in raw.items()}
+    except Exception:
+        return {}
+
+
+def save_state():
+    try:
+        now = time.time()
+        raw = {f"{p}|{k}": t for (p, k), t in last_sent.items() if now - t < 24 * 3600}
+        with open(STATE_FILE, "w") as f:
+            json.dump(raw, f)
+    except Exception as e:
+        print("state save fail:", repr(e)[:150])
+
+
+last_sent = load_state()
 
 
 # ---------------- DATA ----------------
@@ -271,6 +294,7 @@ def send(sig):
 def scan():
     pairs = get_pairs()
     print(f"Scanning {len(pairs)} coins...")
+    sent = 0
     for p in pairs:
         for kind, fn in (("PUMP", pump_signal), ("NORMAL", normal_signal)):
             try:
@@ -280,15 +304,18 @@ def scan():
                 if sig:
                     send(sig)
                     last_sent[(p, kind)] = time.time()
+                    sent += 1
+                    save_state()
                     print("ALERT", p, kind)
             except Exception as e:
                 print("error", p, kind, e)
         time.sleep(0.15)
+    return sent
 
 
 def main():
-    """chart_loop.py isko call karta hai: ek baar poora scan"""
-    scan()
+    """chart_loop.py isko call karta hai: ek baar poora scan, kitne alert gaye wo return karta hai"""
+    return scan()
 
 
 if __name__ == "__main__":
@@ -304,3 +331,4 @@ if __name__ == "__main__":
         if MAX_RUNTIME and time.time() - begin > MAX_RUNTIME:
             break
         time.sleep(max(10, LOOP_SECONDS - (time.time() - start)))
+          
