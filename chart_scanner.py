@@ -1,7 +1,4 @@
-def main():
-    """chart_loop.py isko call karta hai: ek baar poora scan"""
-    scan()
-      """
+"""
 chart_scanner.py  (single file)
 - NORMAL alert: 1D + 4h + 1h trend must agree, entry trigger on 1h. Chart = 1h.
 - PUMP alert: 5m volume spike + breakout (catches fast moves like Q/USDT). Chart = 1h.
@@ -289,6 +286,11 @@ def scan():
         time.sleep(0.15)
 
 
+def main():
+    """chart_loop.py isko call karta hai: ek baar poora scan"""
+    scan()
+
+
 if __name__ == "__main__":
     begin = time.time()
     while True:
@@ -302,4 +304,3 @@ if __name__ == "__main__":
         if MAX_RUNTIME and time.time() - begin > MAX_RUNTIME:
             break
         time.sleep(max(10, LOOP_SECONDS - (time.time() - start)))
-          
