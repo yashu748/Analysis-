@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install requests matplotlib
+      - run: pip install requests pandas matplotlib
       - name: Keep schedule alive
         run: gh workflow enable chart-loop.yml || true
         env:
