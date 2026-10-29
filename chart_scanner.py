@@ -20,8 +20,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # ---------------- CONFIG ----------------
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TOKEN = os.getenv("TG_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID = os.getenv("TG_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID", "")
 BASE = "https://api.gateio.ws/api/v4"
 
 TOP_N = 150               # top coins by 24h volume
@@ -331,4 +331,4 @@ if __name__ == "__main__":
         if MAX_RUNTIME and time.time() - begin > MAX_RUNTIME:
             break
         time.sleep(max(10, LOOP_SECONDS - (time.time() - start)))
-          
+      
