@@ -18,5 +18,5 @@ jobs:
       - run: python futures_bot.py
         env:
           RUN_ONCE: "1"
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TELEGRAM_TOKEN: ${{ 8987783805:AAFu5E-4CxX5AqQ7nIdzEHP-KRalpay5JpQ }}
+          CHAT_ID: ${{ 688579171 }}
