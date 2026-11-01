@@ -1,7 +1,7 @@
 """
 chart_scanner.py  (single file)
-- NORMAL alert: 1D + 4h + 1h trend must agree, entry trigger on 1h. Chart = 1h.
-- PUMP alert: 5m volume spike + breakout (catches fast moves like Q/USDT). Chart = 1h.
+- NORMAL alert: 1D + 4h + 1h trend must agree, entry trigger on 15m. Chart = 15m.
+- PUMP alert: 5m volume spike + breakout (catches fast moves like Q/USDT). Chart = 15m.
 - Patterns: breakout/breakdown, engulfing, double top/bottom (LONG and SHORT).
 Run:  python chart_scanner.py          -> loops every 5 minutes
       RUN_ONCE=1 python chart_scanner.py -> one scan (GitHub Actions)
