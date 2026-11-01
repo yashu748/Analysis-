@@ -1,11 +1,11 @@
 """
 chart_scanner.py  (single file)
-- NORMAL alert: 1D + 4h + 1h trend must agree, entry trigger on 15m. Chart = 15m.
-- PUMP alert: 5m volume spike + breakout (catches fast moves like Q/USDT). Chart = 15m.
+- NORMAL alert: 4h + 1h trend must agree, entry trigger on 15m. Chart = 15m.
+- PUMP alert: 5m volume spike + breakout (catches fast moves). Chart = 15m.
 - Patterns: breakout/breakdown, engulfing, double top/bottom (LONG and SHORT).
 Run:  python chart_scanner.py          -> loops every 5 minutes
       RUN_ONCE=1 python chart_scanner.py -> one scan (GitHub Actions)
-Secrets (env): TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID  (change names below if yours differ)
+Secrets (env): TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 Needs: pip install requests pandas matplotlib
 """
 import os
@@ -29,7 +29,7 @@ LOOP_SECONDS = 300        # 5 minutes
 PUMP_VOL_MULT = 3.0       # 5m volume must be 3x of last 20 candles
 PUMP_MOVE_PCT = 3.0       # min move in last 3 candles (5m)
 PUMP_LATE_PCT = 15.0      # skip if already up this much in last 1h (late entry)
-COOLDOWN = {"NORMAL": 4 * 3600, "PUMP": 3600}
+COOLDOWN = {"NORMAL": 2 * 3600, "PUMP": 3600}
 RUN_ONCE = os.getenv("RUN_ONCE") == "1"
 MAX_RUNTIME = int(os.getenv("MAX_RUNTIME", "0"))  # seconds, 0 = run forever
 
@@ -89,7 +89,7 @@ def add_ind(df):
 # ---------------- ANALYSIS ----------------
 def trend(df, big=False):
     x = df.iloc[-1]
-    if big:  # 1D: simple bigger-picture trend
+    if big:  # 4h: simple bigger-picture trend
         if x.c > x.ema50 and x.ema20 > x.ema50:
             return 1
         if x.c < x.ema50 and x.ema20 < x.ema50:
@@ -151,36 +151,36 @@ def levels(df, direction, entry):
 
 
 def normal_signal(pair):
-    h1 = get_df(pair, "1h", 200)
-    if h1 is None:
+    m15 = get_df(pair, "15m", 200)
+    if m15 is None:
         return None
-    t1 = trend(h1)
+    t1 = trend(m15)
     if t1 == 0:
         return None
-    x, prev = h1.iloc[-1], h1.iloc[-2]
+    x, prev = m15.iloc[-1], m15.iloc[-2]
     if (t1 == 1 and x.rsi > 75) or (t1 == -1 and x.rsi < 25):
         return None
-    pats = [p for p in patterns(h1) if p[1] == t1]
-    volavg = h1.v.iloc[-21:-1].mean()
+    pats = [p for p in patterns(m15) if p[1] == t1]
+    volavg = m15.v.iloc[-21:-1].mean()
     if t1 == 1:
-        cross = x.c > x.ema20 and prev.c <= h1.ema20.iloc[-2]
+        cross = x.c > x.ema20 and prev.c <= m15.ema20.iloc[-2]
     else:
-        cross = x.c < x.ema20 and prev.c >= h1.ema20.iloc[-2]
+        cross = x.c < x.ema20 and prev.c >= m15.ema20.iloc[-2]
     if cross and x.v > 1.2 * volavg:
         pats.append(("EMA20 reclaim + volume", t1))
     if not pats:
         return None
-    h4 = get_df(pair, "4h", 200)
-    if h4 is None or trend(h4) != t1:
+    h1 = get_df(pair, "1h", 200)
+    if h1 is None or trend(h1) != t1:
         return None
-    d1 = get_df(pair, "1d", 250)
-    if d1 is None or trend(d1, big=True) != t1:
+    h4 = get_df(pair, "4h", 250)
+    if h4 is None or trend(h4, big=True) != t1:
         return None
     entry = x.c
-    sl, tp1, tp2 = levels(h1, t1, entry)
+    sl, tp1, tp2 = levels(m15, t1, entry)
     return dict(kind="NORMAL", pair=pair, dir=t1, entry=entry, sl=sl, tp1=tp1,
                 tp2=tp2, notes=", ".join(p[0] for p in pats),
-                tf="1D: OK | 4h: OK | 1h: Entry", df=h1)
+                tf="4h: OK | 1h: OK | 15m: Entry", df=m15)
 
 
 def pump_signal(pair):
@@ -205,6 +205,9 @@ def pump_signal(pair):
     xh = h1.iloc[-1]
     if xh.c < xh.ema20 < xh.ema50:  # 1h clearly bearish -> skip
         return None
+    m15 = get_df(pair, "15m", 200)  # chart ke liye
+    if m15 is None:
+        return None
     entry = x.c
     sl = max(m5.l.iloc[-4:].min(), entry - 2 * x.atr)  # tight SL
     risk = entry - sl
@@ -212,7 +215,7 @@ def pump_signal(pair):
                 tp1=entry + 1.5 * risk, tp2=entry + 3 * risk,
                 notes=f"5m volume {x.v / avgv:.1f}x, +{move:.1f}% in 15 min, "
                       f"+{late:.1f}% in last 1h",
-                tf="5m: PUMP trigger | 1h: not bearish", df=h1)
+                tf="5m: PUMP trigger | 1h: not bearish", df=m15)
 
 
 # ---------------- ALERT ----------------
@@ -236,7 +239,7 @@ def make_chart(sig):
         ax.text(len(d) - 1, val, f" {name} {fmt(val)}", color=col,
                 va="center", fontsize=8)
     side = "LONG" if sig["dir"] == 1 else "SHORT"
-    ax.set_title(f"{sig['pair']} 1H - {side} ({sig['kind']})")
+    ax.set_title(f"{sig['pair']} 15M - {side} ({sig['kind']})")
     ax.legend(loc="upper left", fontsize=8)
     ax.set_xlim(-1, len(d) + 8)
     buf = io.BytesIO()
@@ -304,3 +307,4 @@ if __name__ == "__main__":
         if MAX_RUNTIME and time.time() - begin > MAX_RUNTIME:
             break
         time.sleep(max(10, LOOP_SECONDS - (time.time() - start)))
+          
