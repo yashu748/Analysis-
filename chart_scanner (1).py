@@ -1,15 +1,16 @@
 """
-chart_scanner.py  (single file)
+chart_scanner.py  (single file) - 15 MINUTE VERSION
 - NORMAL alert: 4h + 1h trend must agree, entry trigger on 15m. Chart = 15m.
-- PUMP alert: 5m volume spike + breakout (catches fast moves). Chart = 15m.
-- Patterns: breakout/breakdown, engulfing, double top/bottom (LONG and SHORT).
+- PUMP alert: 5m volume spike + breakout. Chart = 15m.
+- Cooldown state file me save hota hai (chart_loop.py use repo me push karta hai).
 Run:  python chart_scanner.py          -> loops every 5 minutes
-      RUN_ONCE=1 python chart_scanner.py -> one scan (GitHub Actions)
+      RUN_ONCE=1 python chart_scanner.py -> one scan (chart_loop.py ke liye)
 Secrets (env): TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 Needs: pip install requests pandas matplotlib
 """
 import os
 import io
+import json
 import time
 import requests
 import pandas as pd
@@ -23,17 +24,36 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 BASE = "https://api.gateio.ws/api/v4"
 
-TOP_N = 150               # top coins by 24h volume
-MIN_24H_VOL = 300000      # min 24h USDT volume
-LOOP_SECONDS = 300        # 5 minutes
-PUMP_VOL_MULT = 3.0       # 5m volume must be 3x of last 20 candles
-PUMP_MOVE_PCT = 3.0       # min move in last 3 candles (5m)
-PUMP_LATE_PCT = 15.0      # skip if already up this much in last 1h (late entry)
+TOP_N = 150
+MIN_24H_VOL = 300000
+LOOP_SECONDS = 300
+PUMP_VOL_MULT = 3.0
+PUMP_MOVE_PCT = 3.0
+PUMP_LATE_PCT = 15.0
 COOLDOWN = {"NORMAL": 2 * 3600, "PUMP": 3600}
 RUN_ONCE = os.getenv("RUN_ONCE") == "1"
-MAX_RUNTIME = int(os.getenv("MAX_RUNTIME", "0"))  # seconds, 0 = run forever
+MAX_RUNTIME = int(os.getenv("MAX_RUNTIME", "0"))
+STATE_FILE = os.getenv("STATE_FILE", "alert_state_chart.json")
 
-last_sent = {}
+
+# ---------------- STATE ----------------
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            return {tuple(k.split("|")): v for k, v in json.load(f).items()}
+    except Exception:
+        return {}
+
+
+def save_state():
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump({"|".join(k): v for k, v in last_sent.items()}, f)
+    except Exception as e:
+        print("state save error", e)
+
+
+last_sent = load_state()
 
 
 # ---------------- DATA ----------------
@@ -65,7 +85,7 @@ def get_df(pair, interval, limit=200):
     for col in ["c", "h", "l", "o", "v"]:
         df[col] = df[col].astype(float)
     df["t"] = pd.to_datetime(df["t"].astype(int), unit="s")
-    if str(df["w"].iloc[-1]).lower() == "false":  # drop running candle
+    if str(df["w"].iloc[-1]).lower() == "false":
         df = df.iloc[:-1]
     df = df.reset_index(drop=True)
     return add_ind(df)
@@ -89,7 +109,7 @@ def add_ind(df):
 # ---------------- ANALYSIS ----------------
 def trend(df, big=False):
     x = df.iloc[-1]
-    if big:  # 4h: simple bigger-picture trend
+    if big:
         if x.c > x.ema50 and x.ema20 > x.ema50:
             return 1
         if x.c < x.ema50 and x.ema20 < x.ema50:
@@ -103,7 +123,6 @@ def trend(df, big=False):
 
 
 def patterns(df):
-    """returns list of (name, direction) direction: 1 bullish, -1 bearish"""
     out = []
     a, b = df.iloc[-1], df.iloc[-2]
     hi20 = df.h.iloc[-21:-1].max()
@@ -203,13 +222,13 @@ def pump_signal(pair):
     if h1 is None:
         return None
     xh = h1.iloc[-1]
-    if xh.c < xh.ema20 < xh.ema50:  # 1h clearly bearish -> skip
+    if xh.c < xh.ema20 < xh.ema50:
         return None
-    m15 = get_df(pair, "15m", 200)  # chart ke liye
+    m15 = get_df(pair, "15m", 200)
     if m15 is None:
         return None
     entry = x.c
-    sl = max(m5.l.iloc[-4:].min(), entry - 2 * x.atr)  # tight SL
+    sl = max(m5.l.iloc[-4:].min(), entry - 2 * x.atr)
     risk = entry - sl
     return dict(kind="PUMP", pair=pair, dir=1, entry=entry, sl=sl,
                 tp1=entry + 1.5 * risk, tp2=entry + 3 * risk,
@@ -251,7 +270,7 @@ def make_chart(sig):
 
 def send(sig):
     side = "LONG 🟢" if sig["dir"] == 1 else "SHORT 🔴"
-    head = "🚀 PUMP ALERT (HIGH RISK)" if sig["kind"] == "PUMP" else "📊 TREND ALERT"
+    head = "🚀 PUMP ALERT (HIGH RISK)" if sig["kind"] == "PUMP" else "📊 TREND ALERT (15M)"
     cap = (
         f"{head}\n{sig['pair']} - {side}\n\n"
         f"Timeframes: {sig['tf']}\n"
@@ -283,6 +302,7 @@ def scan():
                 if sig:
                     send(sig)
                     last_sent[(p, kind)] = time.time()
+                    save_state()
                     print("ALERT", p, kind)
             except Exception as e:
                 print("error", p, kind, e)
@@ -290,7 +310,6 @@ def scan():
 
 
 def main():
-    """chart_loop.py isko call karta hai: ek baar poora scan"""
     scan()
 
 
