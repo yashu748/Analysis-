@@ -1,39 +1,44 @@
-name: Chart scanner
+name: Chart Scanner
+
 on:
   schedule:
-    - cron: "*/15 * * * *"   # har 15 minute
-  workflow_dispatch: {}
-
-permissions:
-  contents: write
+    - cron: "0 * * * *"
+  workflow_dispatch:
 
 concurrency:
   group: chart-scanner
   cancel-in-progress: false
 
+permissions:
+  contents: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install requests pandas matplotlib
-      - run: python chart_scanner.py
+
+      - name: Install packages
+        run: pip install requests pandas matplotlib
+
+      - name: Run python chart_scanner.py
         env:
-          TG_TOKEN: ${{ secrets.TG_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          MIN_QUOTE_VOL: "1000000"
-          MAX_COINS: "150"
-          MIN_SCORE: "7"
-          MIN_BUY_RATIO: "0.65"
-          COOLDOWN_H: "6"
-          MAX_ALERTS: "15"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MAX_RUNTIME: "3300"
+        run: python chart_scanner.py
+
       - name: Save alert state
+        if: always()
         run: |
           git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add alert_state_chart.json || true
-          git diff --cached --quiet || (git commit -m "update alert state" && git push)
+          git config user.email "github-actions@github.com"
+          git add -A
+          git commit -m "update alert state" || exit 0
+          for i in 1 2 3 4 5; do
+            git pul
