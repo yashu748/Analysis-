@@ -1,329 +1,348 @@
+#!/usr/bin/env python3
 """
-chart_scanner.py  (single file) - 15 MINUTE VERSION
-- NORMAL alert: 4h + 1h trend must agree, entry trigger on 15m. Chart = 15m.
-- PUMP alert: 5m volume spike + breakout. Chart = 15m.
-- Cooldown state file me save hota hai (chart_loop.py use repo me push karta hai).
-Run:  python chart_scanner.py          -> loops every 5 minutes
-      RUN_ONCE=1 python chart_scanner.py -> one scan (chart_loop.py ke liye)
-Secrets (env): TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-Needs: pip install requests pandas matplotlib
+chart_scanner.py  -  Gate.io multi-timeframe scanner (single file)
+
+ANALYSIS : 1D + 4H + 1H  -> trend filter (direction must agree)
+ALERT    : 15m           -> entry trigger + 15m chart sent to Telegram
+
+Run:      python chart_scanner.py          (sends Telegram alerts)
+Test run: python chart_scanner.py --dry    (prints only, no Telegram)
+Needs:    pip install requests pandas numpy matplotlib
+Secrets:  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID  (env vars / GitHub secrets)
 """
-import os
 import io
 import json
+import os
+import sys
 import time
-import requests
-import pandas as pd
-import matplotlib
 
+import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import requests
 
-# ---------------- CONFIG ----------------
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-BASE = "https://api.gateio.ws/api/v4"
+# ============================ CONFIG ============================
+API = "https://api.gateio.ws/api/v4"
 
-TOP_N = 150
-MIN_24H_VOL = 300000
-LOOP_SECONDS = 300
-PUMP_VOL_MULT = 3.0
-PUMP_MOVE_PCT = 3.0
-PUMP_LATE_PCT = 15.0
-COOLDOWN = {"NORMAL": 2 * 3600, "PUMP": 3600}
-RUN_ONCE = os.getenv("RUN_ONCE") == "1"
-MAX_RUNTIME = int(os.getenv("MAX_RUNTIME", "0"))
-STATE_FILE = os.getenv("STATE_FILE", "alert_state_chart.json")
+TG_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
+            or os.getenv("BOT_TOKEN") or "")
+TG_CHAT = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID") or ""
+
+ENTRY_TF = "15m"          # alert / chart timeframe
+MAX_PAIRS = 150           # scan top N USDT pairs by volume
+MIN_QUOTE_VOL = 300_000   # min 24h volume in USDT
+VOL_MULT = 1.3            # 15m volume must be >= 1.3x average of last 20
+SL_ATR = 1.5              # stop loss = 1.5 x ATR(14) on 15m
+TP1_R, TP2_R = 1.5, 3.0   # targets in multiples of risk
+MIN_SCORE = 70            # send alert only if score >= this
+MAX_SIGNAL_AGE_MIN = 14   # signal candle must have closed within this many minutes
+COOLDOWN_MIN = 120        # same coin + same side: no repeat within this time
+COOLDOWN_FILE = "sent_alerts.json"
+CALL_SLEEP = 0.08         # pause between API calls (rate limit)
+
+STABLES = {"USDC", "TUSD", "FDUSD", "DAI", "USDD", "USDE", "PYUSD", "USD1", "BUSD"}
+SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
+DRY = "--dry" in sys.argv
 
 
-# ---------------- STATE ----------------
-def load_state():
+# ============================ DATA ============================
+def get_candles(pair, interval, limit=200):
+    """Return DataFrame of CLOSED candles only (unclosed last candle removed)."""
+    for _ in range(3):
+        try:
+            r = requests.get(
+                f"{API}/spot/candlesticks",
+                params={"currency_pair": pair, "interval": interval, "limit": limit},
+                timeout=15,
+            )
+            if r.status_code == 429:
+                time.sleep(2)
+                continue
+            r.raise_for_status()
+            rows = r.json()
+            if not rows:
+                return None
+            cols = ["ts", "quote_vol", "close", "high", "low", "open", "base_vol", "closed"]
+            df = pd.DataFrame(rows, columns=cols[:len(rows[0])])
+            for c in ["ts", "quote_vol", "close", "high", "low", "open"]:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+            df = df.dropna().sort_values("ts").reset_index(drop=True)
+            now = time.time()
+            df = df[df["ts"] + SECONDS[interval] <= now].reset_index(drop=True)
+            return df if len(df) else None
+        except Exception:
+            time.sleep(1)
+    return None
+
+
+def get_universe():
+    r = requests.get(f"{API}/spot/tickers", timeout=20)
+    r.raise_for_status()
+    out = []
+    for t in r.json():
+        pair = t.get("currency_pair", "")
+        if not pair.endswith("_USDT"):
+            continue
+        base = pair[:-5]
+        if base in STABLES or base.endswith(("3L", "3S", "5L", "5S")):
+            continue
+        try:
+            qv = float(t.get("quote_volume") or 0)
+        except ValueError:
+            continue
+        if qv >= MIN_QUOTE_VOL:
+            out.append((pair, qv))
+    out.sort(key=lambda x: x[1], reverse=True)
+    return [p for p, _ in out[:MAX_PAIRS]]
+
+
+# ============================ INDICATORS ============================
+def ema(s, n):
+    return s.ewm(span=n, adjust=False).mean()
+
+
+def rsi(c, n=14):
+    d = c.diff()
+    up = d.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean()
+    dn = (-d.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean()
+    rs = up / dn.replace(0, np.nan)
+    return (100 - 100 / (1 + rs)).fillna(50)
+
+
+def macd_hist(c):
+    m = ema(c, 12) - ema(c, 26)
+    return m - ema(m, 9)
+
+
+def atr(df, n=14):
+    pc = df["close"].shift(1)
+    tr = pd.concat([df["high"] - df["low"],
+                    (df["high"] - pc).abs(),
+                    (df["low"] - pc).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / n, adjust=False).mean()
+
+
+# ============================ ANALYSIS ============================
+def tf_bias(df):
+    """Return (bias, score). bias: +1 up, -1 down, 0 flat/unknown."""
+    if df is None or len(df) < 55:
+        return 0, 0
+    c = df["close"]
+    e20, e50 = ema(c, 20), ema(c, 50)
+    score = 0
+    score += 1 if c.iloc[-1] > e20.iloc[-1] else -1
+    score += 1 if e20.iloc[-1] > e50.iloc[-1] else -1
+    score += 1 if macd_hist(c).iloc[-1] > 0 else -1
+    score += 1 if rsi(c).iloc[-1] > 50 else -1
+    bias = 1 if score >= 2 else (-1 if score <= -2 else 0)
+    return bias, score
+
+
+def trigger_15m(df):
+    """Entry trigger on the LAST CLOSED 15m candle. Returns dict or None."""
+    if df is None or len(df) < 60:
+        return None
+    c = df["close"]
+    e9, e21, e50 = ema(c, 9), ema(c, 21), ema(c, 50)
+    rs = rsi(c)
+    a = atr(df)
+    vol_avg = df["quote_vol"].rolling(20).mean().shift(1)
+    if not vol_avg.iloc[-1] or np.isnan(vol_avg.iloc[-1]):
+        return None
+    vr = df["quote_vol"].iloc[-1] / vol_avg.iloc[-1]
+
+    hh = df["high"].iloc[-21:-1].max()
+    ll = df["low"].iloc[-21:-1].min()
+    cross_up = e9.iloc[-2] <= e21.iloc[-2] and e9.iloc[-1] > e21.iloc[-1]
+    cross_dn = e9.iloc[-2] >= e21.iloc[-2] and e9.iloc[-1] < e21.iloc[-1]
+    brk_up = c.iloc[-1] > hh
+    brk_dn = c.iloc[-1] < ll
+    r_now = float(rs.iloc[-1])
+
+    side, why = None, ""
+    if (cross_up or brk_up) and 45 <= r_now <= 72 and vr >= VOL_MULT and c.iloc[-1] > e50.iloc[-1]:
+        side = "LONG"
+        why = "EMA9/21 cross up" if cross_up else "20-candle breakout up"
+    elif (cross_dn or brk_dn) and 28 <= r_now <= 55 and vr >= VOL_MULT and c.iloc[-1] < e50.iloc[-1]:
+        side = "SHORT"
+        why = "EMA9/21 cross down" if cross_dn else "20-candle breakdown"
+    if not side:
+        return None
+
+    entry = float(c.iloc[-1])
+    risk = SL_ATR * float(a.iloc[-1])
+    if risk <= 0:
+        return None
+    sign = 1 if side == "LONG" else -1
+    return {
+        "side": side, "why": why, "entry": entry,
+        "sl": entry - sign * risk,
+        "tp1": entry + sign * TP1_R * risk,
+        "tp2": entry + sign * TP2_R * risk,
+        "rsi": r_now, "vr": float(vr),
+    }
+
+
+def fmt(x):
+    if x >= 100:
+        return f"{x:.2f}"
+    if x >= 1:
+        return f"{x:.4f}"
+    return f"{x:.8f}".rstrip("0")
+
+
+def label(b):
+    return "UP" if b > 0 else ("DOWN" if b < 0 else "FLAT")
+
+
+# ============================ CHART ============================
+def make_chart(df, pair, sig):
+    d = df.tail(80).reset_index(drop=True)
+    c = df["close"]
+    e9, e21, e50 = ema(c, 9).tail(80).values, ema(c, 21).tail(80).values, ema(c, 50).tail(80).values
+
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=110)
+    fig.patch.set_facecolor("#0e1117")
+    ax.set_facecolor("#0e1117")
+    for i, r in d.iterrows():
+        col = "#26a69a" if r["close"] >= r["open"] else "#ef5350"
+        ax.plot([i, i], [r["low"], r["high"]], color=col, lw=1)
+        h = max(abs(r["close"] - r["open"]), 1e-12)
+        ax.add_patch(plt.Rectangle((i - 0.35, min(r["open"], r["close"])), 0.7, h, color=col))
+    x = np.arange(len(d))
+    ax.plot(x, e9, color="#ffd54f", lw=1, label="EMA9")
+    ax.plot(x, e21, color="#42a5f5", lw=1, label="EMA21")
+    ax.plot(x, e50, color="#ab47bc", lw=1, label="EMA50")
+
+    n = len(d)
+    green, red = "#26a69a", "#ef5350"
+    good, bad = (green, red)
+    ax.axhspan(sig["entry"], sig["tp2"], xmin=0.78, xmax=1, color=good, alpha=0.18)
+    ax.axhspan(sig["entry"], sig["sl"], xmin=0.78, xmax=1, color=bad, alpha=0.18)
+    for name, val, col in [("ENTRY", sig["entry"], "#ffffff"), ("SL", sig["sl"], bad),
+                           ("TP1", sig["tp1"], good), ("TP2", sig["tp2"], good)]:
+        ax.axhline(val, color=col, lw=0.9, ls="--")
+        ax.text(n + 0.5, val, f" {name} {fmt(val)}", color=col, va="center", fontsize=8)
+
+    lo = min(d["low"].min(), sig["sl"])
+    hi = max(d["high"].max(), sig["tp2"])
+    pad = (hi - lo) * 0.05
+    ax.set_ylim(lo - pad, hi + pad)
+    ax.set_xlim(-1, n + 12)
+    ax.set_title(f"{pair.replace('_', '/')}  {ENTRY_TF}  {sig['side']}", color="white", fontsize=12)
+    ax.tick_params(colors="#9e9e9e", labelsize=8)
+    for s in ax.spines.values():
+        s.set_color("#333333")
+    ax.legend(loc="upper left", facecolor="#0e1117", labelcolor="white", fontsize=8, frameon=False)
+    ax.grid(color="#1e232d", lw=0.5)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# ============================ TELEGRAM ============================
+def send_photo(img, caption):
+    if DRY or not TG_TOKEN or not TG_CHAT:
+        print("[DRY/NO TOKEN]\n" + caption + "\n")
+        return
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
     try:
-        with open(STATE_FILE) as f:
-            return {tuple(k.split("|")): v for k, v in json.load(f).items()}
+        r = requests.post(url, data={"chat_id": TG_CHAT, "caption": caption[:1000]},
+                          files={"photo": ("chart.png", img)}, timeout=40)
+        if r.status_code != 200:
+            print("Telegram error:", r.text[:200])
+    except Exception as e:
+        print("Telegram exception:", e)
+
+
+def load_sent():
+    try:
+        with open(COOLDOWN_FILE) as f:
+            return json.load(f)
     except Exception:
         return {}
 
 
-def save_state():
+def save_sent(d):
     try:
-        with open(STATE_FILE, "w") as f:
-            json.dump({"|".join(k): v for k, v in last_sent.items()}, f)
-    except Exception as e:
-        print("state save error", e)
+        with open(COOLDOWN_FILE, "w") as f:
+            json.dump(d, f)
+    except Exception:
+        pass
 
 
-last_sent = load_state()
-
-
-# ---------------- DATA ----------------
-def get_pairs():
-    r = requests.get(f"{BASE}/spot/tickers", timeout=15).json()
-    rows = []
-    for t in r:
-        p = t["currency_pair"]
-        if not p.endswith("_USDT"):
-            continue
-        if any(x in p for x in ("3L_", "3S_", "5L_", "5S_")):
-            continue
-        qv = float(t.get("quote_volume") or 0)
-        if qv >= MIN_24H_VOL:
-            rows.append((p, qv))
-    rows.sort(key=lambda x: -x[1])
-    return [p for p, _ in rows[:TOP_N]]
-
-
-def get_df(pair, interval, limit=200):
-    r = requests.get(
-        f"{BASE}/spot/candlesticks",
-        params={"currency_pair": pair, "interval": interval, "limit": limit},
-        timeout=15,
-    ).json()
-    if not isinstance(r, list) or len(r) < 60:
-        return None
-    df = pd.DataFrame(r, columns=["t", "qv", "c", "h", "l", "o", "v", "w"])
-    for col in ["c", "h", "l", "o", "v"]:
-        df[col] = df[col].astype(float)
-    df["t"] = pd.to_datetime(df["t"].astype(int), unit="s")
-    if str(df["w"].iloc[-1]).lower() == "false":
-        df = df.iloc[:-1]
-    df = df.reset_index(drop=True)
-    return add_ind(df)
-
-
-def add_ind(df):
-    df["ema20"] = df.c.ewm(span=20, adjust=False).mean()
-    df["ema50"] = df.c.ewm(span=50, adjust=False).mean()
-    d = df.c.diff()
-    up = d.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
-    dn = (-d.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
-    df["rsi"] = 100 - 100 / (1 + up / dn.replace(0, 1e-9))
-    tr = pd.concat(
-        [df.h - df.l, (df.h - df.c.shift()).abs(), (df.l - df.c.shift()).abs()],
-        axis=1,
-    ).max(axis=1)
-    df["atr"] = tr.ewm(alpha=1 / 14, adjust=False).mean()
-    return df
-
-
-# ---------------- ANALYSIS ----------------
-def trend(df, big=False):
-    x = df.iloc[-1]
-    if big:
-        if x.c > x.ema50 and x.ema20 > x.ema50:
-            return 1
-        if x.c < x.ema50 and x.ema20 < x.ema50:
-            return -1
-        return 0
-    if x.c > x.ema20 > x.ema50 and x.rsi > 50:
-        return 1
-    if x.c < x.ema20 < x.ema50 and x.rsi < 50:
-        return -1
-    return 0
-
-
-def patterns(df):
-    out = []
-    a, b = df.iloc[-1], df.iloc[-2]
-    hi20 = df.h.iloc[-21:-1].max()
-    lo20 = df.l.iloc[-21:-1].min()
-    if a.c > hi20:
-        out.append(("Breakout (20-candle high)", 1))
-    if a.c < lo20:
-        out.append(("Breakdown (20-candle low)", -1))
-    if a.c > a.o and b.c < b.o and a.c > b.o and a.o < b.c:
-        out.append(("Bullish Engulfing", 1))
-    if a.c < a.o and b.c > b.o and a.c < b.o and a.o > b.c:
-        out.append(("Bearish Engulfing", -1))
-
-    w = df.iloc[-40:].reset_index(drop=True)
-    h, l = w.h.values, w.l.values
-    n = len(w)
-    ph = [i for i in range(2, n - 2) if h[i] == max(h[i - 2:i + 3])]
-    pl = [i for i in range(2, n - 2) if l[i] == min(l[i - 2:i + 3])]
-    if len(ph) >= 2:
-        i1, i2 = ph[-2], ph[-1]
-        neck = min(l[i1:i2 + 1])
-        if i2 - i1 >= 5 and abs(h[i1] - h[i2]) / h[i1] < 0.006 and a.c < neck:
-            out.append(("Double Top breakdown (M)", -1))
-    if len(pl) >= 2:
-        i1, i2 = pl[-2], pl[-1]
-        neck = max(h[i1:i2 + 1])
-        if i2 - i1 >= 5 and abs(l[i1] - l[i2]) / l[i1] < 0.006 and a.c > neck:
-            out.append(("Double Bottom breakout (W)", 1))
-    return out
-
-
-def levels(df, direction, entry):
-    atr = df.atr.iloc[-1]
-    if direction == 1:
-        sl = df.l.iloc[-5:].min() - 0.1 * atr
-        if entry - sl > 2.5 * atr:
-            sl = entry - 2.5 * atr
-        risk = entry - sl
-        return sl, entry + 1.5 * risk, entry + 3 * risk
-    sl = df.h.iloc[-5:].max() + 0.1 * atr
-    if sl - entry > 2.5 * atr:
-        sl = entry + 2.5 * atr
-    risk = sl - entry
-    return sl, entry - 1.5 * risk, entry - 3 * risk
-
-
-def normal_signal(pair):
-    m15 = get_df(pair, "15m", 200)
-    if m15 is None:
-        return None
-    t1 = trend(m15)
-    if t1 == 0:
-        return None
-    x, prev = m15.iloc[-1], m15.iloc[-2]
-    if (t1 == 1 and x.rsi > 75) or (t1 == -1 and x.rsi < 25):
-        return None
-    pats = [p for p in patterns(m15) if p[1] == t1]
-    volavg = m15.v.iloc[-21:-1].mean()
-    if t1 == 1:
-        cross = x.c > x.ema20 and prev.c <= m15.ema20.iloc[-2]
-    else:
-        cross = x.c < x.ema20 and prev.c >= m15.ema20.iloc[-2]
-    if cross and x.v > 1.2 * volavg:
-        pats.append(("EMA20 reclaim + volume", t1))
-    if not pats:
-        return None
-    h1 = get_df(pair, "1h", 200)
-    if h1 is None or trend(h1) != t1:
-        return None
-    h4 = get_df(pair, "4h", 250)
-    if h4 is None or trend(h4, big=True) != t1:
-        return None
-    entry = x.c
-    sl, tp1, tp2 = levels(m15, t1, entry)
-    return dict(kind="NORMAL", pair=pair, dir=t1, entry=entry, sl=sl, tp1=tp1,
-                tp2=tp2, notes=", ".join(p[0] for p in pats),
-                tf="4h: OK | 1h: OK | 15m: Entry", df=m15)
-
-
-def pump_signal(pair):
-    m5 = get_df(pair, "5m", 120)
-    if m5 is None:
-        return None
-    x = m5.iloc[-1]
-    avgv = m5.v.iloc[-21:-1].mean()
-    if avgv <= 0 or x.v < PUMP_VOL_MULT * avgv:
-        return None
-    move = (x.c / m5.o.iloc[-3] - 1) * 100
-    if move < PUMP_MOVE_PCT:
-        return None
-    if x.c <= m5.h.iloc[-21:-1].max():
-        return None
-    late = (x.c / m5.c.iloc[-13] - 1) * 100
-    if late > PUMP_LATE_PCT:
-        return None
-    h1 = get_df(pair, "1h", 200)
-    if h1 is None:
-        return None
-    xh = h1.iloc[-1]
-    if xh.c < xh.ema20 < xh.ema50:
-        return None
-    m15 = get_df(pair, "15m", 200)
-    if m15 is None:
-        return None
-    entry = x.c
-    sl = max(m5.l.iloc[-4:].min(), entry - 2 * x.atr)
-    risk = entry - sl
-    return dict(kind="PUMP", pair=pair, dir=1, entry=entry, sl=sl,
-                tp1=entry + 1.5 * risk, tp2=entry + 3 * risk,
-                notes=f"5m volume {x.v / avgv:.1f}x, +{move:.1f}% in 15 min, "
-                      f"+{late:.1f}% in last 1h",
-                tf="5m: PUMP trigger | 1h: not bearish", df=m15)
-
-
-# ---------------- ALERT ----------------
-def fmt(v):
-    return f"{v:.6g}"
-
-
-def make_chart(sig):
-    d = sig["df"].iloc[-60:].reset_index(drop=True)
-    fig, ax = plt.subplots(figsize=(9, 5))
-    for i, r in d.iterrows():
-        col = "#26a69a" if r.c >= r.o else "#ef5350"
-        ax.vlines(i, r.l, r.h, color=col, lw=1)
-        ax.bar(i, abs(r.c - r.o) or r.c * 1e-5, bottom=min(r.o, r.c),
-               color=col, width=0.7)
-    ax.plot(d.ema20, lw=1, label="EMA20")
-    ax.plot(d.ema50, lw=1, label="EMA50")
-    for name, val, col in [("Entry", sig["entry"], "gray"), ("SL", sig["sl"], "red"),
-                           ("TP1", sig["tp1"], "green"), ("TP2", sig["tp2"], "green")]:
-        ax.axhline(val, color=col, ls="--", lw=1)
-        ax.text(len(d) - 1, val, f" {name} {fmt(val)}", color=col,
-                va="center", fontsize=8)
-    side = "LONG" if sig["dir"] == 1 else "SHORT"
-    ax.set_title(f"{sig['pair']} 15M - {side} ({sig['kind']})")
-    ax.legend(loc="upper left", fontsize=8)
-    ax.set_xlim(-1, len(d) + 8)
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=110, bbox_inches="tight")
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-
-def send(sig):
-    side = "LONG 🟢" if sig["dir"] == 1 else "SHORT 🔴"
-    head = "🚀 PUMP ALERT (HIGH RISK)" if sig["kind"] == "PUMP" else "📊 TREND ALERT (15M)"
-    cap = (
-        f"{head}\n{sig['pair']} - {side}\n\n"
-        f"Timeframes: {sig['tf']}\n"
-        f"Reason: {sig['notes']}\n\n"
-        f"Entry: {fmt(sig['entry'])}\n"
-        f"SL: {fmt(sig['sl'])}\n"
-        f"TP1: {fmt(sig['tp1'])}\n"
-        f"TP2: {fmt(sig['tp2'])}\n\n"
-        "Not financial advice. Use small size."
-    )
-    requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
-        data={"chat_id": CHAT_ID, "caption": cap[:1000]},
-        files={"photo": ("chart.png", make_chart(sig))},
-        timeout=30,
-    )
-
-
-# ---------------- MAIN ----------------
-def scan():
-    pairs = get_pairs()
-    print(f"Scanning {len(pairs)} coins...")
-    for p in pairs:
-        for kind, fn in (("PUMP", pump_signal), ("NORMAL", normal_signal)):
-            try:
-                if time.time() - last_sent.get((p, kind), 0) < COOLDOWN[kind]:
-                    continue
-                sig = fn(p)
-                if sig:
-                    send(sig)
-                    last_sent[(p, kind)] = time.time()
-                    save_state()
-                    print("ALERT", p, kind)
-            except Exception as e:
-                print("error", p, kind, e)
-        time.sleep(0.15)
-
-
+# ============================ MAIN ============================
 def main():
-    scan()
+    pairs = get_universe()
+    print(f"Scanning {len(pairs)} pairs | analysis 1D/4H/1H | alert {ENTRY_TF}")
+    sent = load_sent()
+    now = time.time()
+    found = 0
+
+    for pair in pairs:
+        try:
+            df15 = get_candles(pair, ENTRY_TF, 150)
+            time.sleep(CALL_SLEEP)
+            if df15 is None:
+                continue
+            closed_at = df15["ts"].iloc[-1] + SECONDS[ENTRY_TF]
+            if now - closed_at > MAX_SIGNAL_AGE_MIN * 60:
+                continue
+
+            sig = trigger_15m(df15)
+            if not sig:
+                continue
+
+            # higher timeframes only for coins that already have a 15m trigger
+            b1h, _ = tf_bias(get_candles(pair, "1h", 200)); time.sleep(CALL_SLEEP)
+            b4h, _ = tf_bias(get_candles(pair, "4h", 200)); time.sleep(CALL_SLEEP)
+            b1d, _ = tf_bias(get_candles(pair, "1d", 200)); time.sleep(CALL_SLEEP)
+
+            want = 1 if sig["side"] == "LONG" else -1
+            # 4H and 1H must agree, 1D must not be against
+            if b4h != want or b1h != want or b1d == -want:
+                continue
+
+            score = 50
+            score += 10 if b1h == want else 0
+            score += 10 if b4h == want else 0
+            score += 10 if b1d == want else 0
+            score += int(min(sig["vr"], 3) * 5)
+            score = min(score, 95)
+            if score < MIN_SCORE:
+                continue
+
+            key = f"{pair}_{sig['side']}"
+            if now - sent.get(key, 0) < COOLDOWN_MIN * 60:
+                continue
+
+            e = sig["entry"]
+            pct = lambda v: f"{(v - e) / e * 100:+.2f}%"
+            icon = "🟢" if sig["side"] == "LONG" else "🔴"
+            caption = (
+                f"{icon} {sig['side']} | {pair.replace('_', '/')} | {ENTRY_TF}\n"
+                f"Entry: {fmt(e)}\n"
+                f"SL: {fmt(sig['sl'])} ({pct(sig['sl'])})\n"
+                f"TP1: {fmt(sig['tp1'])} ({pct(sig['tp1'])})\n"
+                f"TP2: {fmt(sig['tp2'])} ({pct(sig['tp2'])})\n"
+                f"Trend: 1D {label(b1d)} | 4H {label(b4h)} | 1H {label(b1h)}\n"
+                f"Trigger: {sig['why']} | Vol x{sig['vr']:.1f} | RSI {sig['rsi']:.0f}\n"
+                f"Score: {score}/100\n"
+                f"Alert only, not advice. Always use SL."
+            )
+            send_photo(make_chart(df15, pair, sig), caption)
+            sent[key] = now
+            found += 1
+        except Exception as ex:
+            print(f"{pair} error: {ex}")
+
+    save_sent(sent)
+    print(f"Done. Alerts sent: {found}")
 
 
 if __name__ == "__main__":
-    begin = time.time()
-    while True:
-        start = time.time()
-        try:
-            scan()
-        except Exception as e:
-            print("scan error", e)
-        if RUN_ONCE:
-            break
-        if MAX_RUNTIME and time.time() - begin > MAX_RUNTIME:
-            break
-        time.sleep(max(10, LOOP_SECONDS - (time.time() - start)))
-          
+    main()
