@@ -41,4 +41,6 @@ jobs:
           git add -A
           git commit -m "update alert state" || exit 0
           for i in 1 2 3 4 5; do
-            git pul
+            git pull --rebase origin main && git push && break
+            sleep 5
+          done
