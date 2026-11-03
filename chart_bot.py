@@ -18,12 +18,15 @@ ALERT_TF = "15m"                                   # alert + chart timeframe
 HTF = {"1h": 900, "4h": 1800, "1d": 7200}          # trend-filter TFs : cache seconds
 SCAN_EVERY = 120                                   # seconds between scans
 RUN_MINUTES = float(os.getenv("RUN_MINUTES", "350"))  # GitHub job limit is 6h
-MIN_VOL_USDT = 300_000                             # 24h volume filter
-MOVER_PCT, MOVER_MIN_VOL = 8.0, 50_000             # fast movers always included
+MIN_VOL_USDT = 1_000_000                             # 24h volume filter
+MOVER_PCT, MOVER_MIN_VOL = 10.0, 300_000           # fast movers (bade volume wale)
 MAX_COINS = 250
-MIN_CONFIRM = 4                                    # out of 5 indicators
-COOLDOWN_MIN = 120                                 # same coin+side repeat gap
-ATR_MULT, MAX_RISK_PCT = 1.5, 4.0                  # SL settings
+MIN_CONFIRM = 5                                    # out of 5 indicators (5 = sabhi)
+VOL_MULT = 2.0                                     # volume spike kitna bada ho
+REQUIRE_PATTERN = False                            # True = pattern bhi zaroori (bahut kam alert)
+MAX_ALERTS_PER_SCAN = 2                            # ek scan mein sirf top alerts
+COOLDOWN_MIN = 360                                 # same coin+side repeat gap
+ATR_MULT, MAX_RISK_PCT = 1.5, 3.0                  # SL settings
 T1_R, T2_R = 1.5, 3.0
 SEND_LONG, SEND_SHORT = True, True
 BASE = "https://api.gateio.ws/api/v4"
@@ -169,7 +172,7 @@ def analyze(pair):
     c = df.c; e9, e26 = ema(c, 9), ema(c, 26)
     st = supertrend(df); r = rsi(c); a = atr(df).iloc[-1]
     ml = ema(c, 12) - ema(c, 26); hist = ml - ema(ml, 9)
-    vol_ok = df.v.iloc[-1] > 1.5 * df.v.iloc[-21:-1].mean()
+    vol_ok = df.v.iloc[-1] > VOL_MULT * df.v.iloc[-21:-1].mean()
     R, price = r.iloc[-1], c.iloc[-1]
     if np.isnan(R) or a <= 0: return None
     L = dict(EMA=e9.iloc[-1] > e26.iloc[-1] and price > e26.iloc[-1], Supertrend=st[-1] == 1,
@@ -183,9 +186,11 @@ def analyze(pair):
     if not side: return None
     if time.time() - last_alert.get((pair, side), 0) < COOLDOWN_MIN * 60: return None
     tr = get_trends(pair); want = 1 if side == "LONG" else -1
-    if sum(1 for v in tr.values() if v == -want) >= 2: return None     # HTF against us
+    # 1h/4h/1d me se koi bhi against na ho aur kam se kam 2 saath ho
+    if any(v == -want for v in tr.values()) or sum(1 for v in tr.values() if v == want) < 2: return None
     pats = detect_patterns(df)
     if any(p["breakout"] and p["side"] != side for p in pats): return None
+    if REQUIRE_PATTERN and not any(p["side"] == side for p in pats): return None
     # SL / targets
     sw = df.tail(10)
     if side == "LONG": sl = min(price - ATR_MULT * a, sw.l.min() - 0.2 * a)
@@ -291,9 +296,11 @@ def scan():
         try: return analyze(p)
         except Exception: traceback.print_exc(); return None
     with ThreadPoolExecutor(6) as ex:
-        for s in ex.map(work, pairs):
-            if s:
-                last_alert[(s["pair"], s["side"])] = time.time(); send(s); sent += 1
+        res = [s for s in ex.map(work, pairs) if s]
+    # best quality pehle: pattern breakout wale, phir bade volume wale
+    res.sort(key=lambda s: any(p["breakout"] and p["side"] == s["side"] for p in s["pats"]), reverse=True)
+    for s in res[:MAX_ALERTS_PER_SCAN]:
+        last_alert[(s["pair"], s["side"])] = time.time(); send(s); sent += 1
     print(time.strftime("%H:%M:%S"), f"scanned {len(pairs)} coins, alerts {sent}", flush=True)
 
 def main():
@@ -307,3 +314,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
