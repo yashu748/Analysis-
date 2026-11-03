@@ -1,11 +1,10 @@
 name: crypto-15m-alert-bot
 
 on:
-  workflow_dispatch:          # manual start (Actions tab > Run workflow)
+  workflow_dispatch:
   schedule:
-    - cron: "5 * * * *"       # har ghante check: agar bot band hai to restart
+    - cron: "5 * * * *"
 
-# Ek time par sirf ek bot chale (duplicate alert na aaye)
 concurrency:
   group: crypto-bot
   cancel-in-progress: false
@@ -20,7 +19,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install requests pandas numpy matplotlib
-      - name: Run bot (loop ~5h50m, phir next run uthata hai)
+      - name: Run bot
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
