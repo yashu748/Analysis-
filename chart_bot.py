@@ -7,9 +7,8 @@ v2 - galat signal rokne ke filters:
   1. Ulta pattern block   : LONG par koi bhi bearish pattern (forming ya breakout) -> alert nahi
                             SHORT par koi bhi bullish pattern -> alert nahi
   2. Resistance/Support   : T1 se pehle resistance (LONG) / support (SHORT) ho -> alert nahi (15m + 1h levels)
-  3. Pump candle block    : badi candle / EMA se door / tez run / volume blow-off -> alert nahi
   4. RSI limit            : LONG RSI <= 62, SHORT RSI >= 38, 1h RSI extreme par bhi block
-  5. Structure SL         : SL swing low/high ke bahar, max risk 4% (zyada ho to alert skip, SL chhota nahi hota)
+  5. Structure SL         : SL swing low/high ke bahar, max risk 4% ( SL chhota nahi hota)
   6. Illiquid coin skip   : movers ke liye bhi minimum volume badhaya
 Har scan ke baad log me dikhta hai ki kaun sa filter kitne signal roka.
 """
@@ -33,7 +32,7 @@ MOVER_PCT, MOVER_MIN_VOL = 10.0, 600_000           # fast movers (bade volume wa
 MAX_COINS = 250
 MIN_CONFIRM = 5                                    # out of 5 indicators (5 = sabhi)
 VOL_MULT = 2.0                                     # volume spike kitna bada ho
-VOL_MAX = 6.0                                      # isse bada volume = blow-off, skip
+VOL_MAX = 10.0                                      # isse bada volume = blow-off, skip
 REQUIRE_PATTERN = False                            # True = pattern bhi zaroori (bahut kam alert)
 MAX_ALERTS_PER_SCAN = 2                            # ek scan mein sirf top alerts
 COOLDOWN_MIN = 360                                 # same coin+side repeat gap
@@ -44,9 +43,9 @@ SEND_LONG, SEND_SHORT = True, True
 # --- v2 filter settings ---
 LONG_RSI_MAX, SHORT_RSI_MIN = 62, 38               # 15m RSI limit
 HTF_RSI_MAX, HTF_RSI_MIN = 70, 30                  # 1h RSI extreme
-BIG_CANDLE_ATR, BIG_BODY_ATR = 2.5, 2.0            # pump candle
-EXTENSION_ATR = 2.0                                # price EMA26 se itna ATR door = chasing
-RUN_ATR = 4.0                                      # pichhli 5 candles me itna move = late
+BIG_CANDLE_ATR, BIG_BODY_ATR = 3.5, 3.0
+EXTENSION_ATR = 3.0
+RUN_ATR = 6.0                                      # pichhli 5 candles me itna move = late
 
 BASE = "https://api.gateio.ws/api/v4"
 STABLE = {"USDC", "TUSD", "FDUSD", "DAI", "USDD", "USDP", "PYUSD", "EURT"}
