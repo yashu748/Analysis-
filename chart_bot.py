@@ -2,6 +2,16 @@
 """
 Gate.io crypto chart-alert bot  (15m alerts, 1h/4h/1d trend filter, continuous loop)
 Telegram secrets: TG_TOKEN, TG_CHAT_ID
+
+v2 - galat signal rokne ke filters:
+  1. Ulta pattern block   : LONG par koi bhi bearish pattern (forming ya breakout) -> alert nahi
+                            SHORT par koi bhi bullish pattern -> alert nahi
+  2. Resistance/Support   : T1 se pehle resistance (LONG) / support (SHORT) ho -> alert nahi (15m + 1h levels)
+  3. Pump candle block    : badi candle / EMA se door / tez run / volume blow-off -> alert nahi
+  4. RSI limit            : LONG RSI <= 62, SHORT RSI >= 38, 1h RSI extreme par bhi block
+  5. Structure SL         : SL swing low/high ke bahar, max risk 4% (zyada ho to alert skip, SL chhota nahi hota)
+  6. Illiquid coin skip   : movers ke liye bhi minimum volume badhaya
+Har scan ke baad log me dikhta hai ki kaun sa filter kitne signal roka.
 """
 import os, io, re, time, threading, traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -19,16 +29,25 @@ HTF = {"1h": 900, "4h": 1800, "1d": 7200}          # trend-filter TFs : cache se
 SCAN_EVERY = 120                                   # seconds between scans
 RUN_MINUTES = float(os.getenv("RUN_MINUTES", "350"))  # GitHub job limit is 6h
 MIN_VOL_USDT = 1_000_000                             # 24h volume filter
-MOVER_PCT, MOVER_MIN_VOL = 10.0, 300_000           # fast movers (bade volume wale)
+MOVER_PCT, MOVER_MIN_VOL = 10.0, 600_000           # fast movers (bade volume wale)
 MAX_COINS = 250
 MIN_CONFIRM = 5                                    # out of 5 indicators (5 = sabhi)
 VOL_MULT = 2.0                                     # volume spike kitna bada ho
+VOL_MAX = 6.0                                      # isse bada volume = blow-off, skip
 REQUIRE_PATTERN = False                            # True = pattern bhi zaroori (bahut kam alert)
 MAX_ALERTS_PER_SCAN = 2                            # ek scan mein sirf top alerts
 COOLDOWN_MIN = 360                                 # same coin+side repeat gap
-ATR_MULT, MAX_RISK_PCT = 1.5, 3.0                  # SL settings
+ATR_MULT, MAX_RISK_PCT = 1.5, 4.0                  # SL settings (risk isse zyada = skip)
 T1_R, T2_R = 1.5, 3.0
 SEND_LONG, SEND_SHORT = True, True
+
+# --- v2 filter settings ---
+LONG_RSI_MAX, SHORT_RSI_MIN = 62, 38               # 15m RSI limit
+HTF_RSI_MAX, HTF_RSI_MIN = 70, 30                  # 1h RSI extreme
+BIG_CANDLE_ATR, BIG_BODY_ATR = 2.5, 2.0            # pump candle
+EXTENSION_ATR = 2.0                                # price EMA26 se itna ATR door = chasing
+RUN_ATR = 4.0                                      # pichhli 5 candles me itna move = late
+
 BASE = "https://api.gateio.ws/api/v4"
 STABLE = {"USDC", "TUSD", "FDUSD", "DAI", "USDD", "USDP", "PYUSD", "EURT"}
 
@@ -114,54 +133,64 @@ def detect_patterns(df, tol=0.008):
     near = lambda a, b: abs(a - b) / max(a, b) <= tol
     def between_min(i, j): return df.l.values[i:j+1].min()
     def between_max(i, j): return df.h.values[i:j+1].max()
-    def add(name, side, neck, height, up):
+    def add(name, side, neck, height, lvl):
+        # lvl = pattern invalidation level (SHORT: pattern ka top, LONG: pattern ka bottom)
+        # price uske bahar nikal chuka ho to pattern fail ho gaya - ignore
+        if side == "SHORT" and close > lvl * 1.003: return
+        if side == "LONG" and close < lvl * 0.997: return
         brk = close < neck if side == "SHORT" else close > neck
         tgt = neck - height if side == "SHORT" else neck + height
         out.append(dict(name=name, side=side, breakout=bool(brk), target=tgt))
     # double / triple top
     if len(hi) >= 2 and near(hi[-1][1], hi[-2][1]) and hi[-1][0] - hi[-2][0] >= 5 and n - hi[-1][0] <= 40:
         neck = between_min(hi[-2][0], hi[-1][0]); top = max(hi[-1][1], hi[-2][1])
-        if (top - neck) / top > 0.012: add("Double Top", "SHORT", neck, top - neck, 0)
+        if (top - neck) / top > 0.012: add("Double Top", "SHORT", neck, top - neck, top)
     if len(hi) >= 3 and near(hi[-1][1], hi[-2][1]) and near(hi[-2][1], hi[-3][1]) and n - hi[-1][0] <= 40:
         neck = between_min(hi[-3][0], hi[-1][0]); top = max(p[1] for p in hi[-3:])
-        if (top - neck) / top > 0.012: add("Triple Top", "SHORT", neck, top - neck, 0)
+        if (top - neck) / top > 0.012: add("Triple Top", "SHORT", neck, top - neck, top)
     # double / triple bottom
     if len(lo) >= 2 and near(lo[-1][1], lo[-2][1]) and lo[-1][0] - lo[-2][0] >= 5 and n - lo[-1][0] <= 40:
         neck = between_max(lo[-2][0], lo[-1][0]); bot = min(lo[-1][1], lo[-2][1])
-        if (neck - bot) / neck > 0.012: add("Double Bottom", "LONG", neck, neck - bot, 1)
+        if (neck - bot) / neck > 0.012: add("Double Bottom", "LONG", neck, neck - bot, bot)
     if len(lo) >= 3 and near(lo[-1][1], lo[-2][1]) and near(lo[-2][1], lo[-3][1]) and n - lo[-1][0] <= 40:
         neck = between_max(lo[-3][0], lo[-1][0]); bot = min(p[1] for p in lo[-3:])
-        if (neck - bot) / neck > 0.012: add("Triple Bottom", "LONG", neck, neck - bot, 1)
+        if (neck - bot) / neck > 0.012: add("Triple Bottom", "LONG", neck, neck - bot, bot)
     # head & shoulders / inverse
     if len(hi) >= 3 and n - hi[-1][0] <= 40:
         a, b, c3 = hi[-3][1], hi[-2][1], hi[-1][1]
         if b > a * 1.01 and b > c3 * 1.01 and near(a, c3):
             neck = (between_min(hi[-3][0], hi[-2][0]) + between_min(hi[-2][0], hi[-1][0])) / 2
-            add("Head & Shoulders", "SHORT", neck, b - neck, 0)
+            add("Head & Shoulders", "SHORT", neck, b - neck, b)
     if len(lo) >= 3 and n - lo[-1][0] <= 40:
         a, b, c3 = lo[-3][1], lo[-2][1], lo[-1][1]
         if b < a * 0.99 and b < c3 * 0.99 and near(a, c3):
             neck = (between_max(lo[-3][0], lo[-2][0]) + between_max(lo[-2][0], lo[-1][0])) / 2
-            add("Inverse H&S", "LONG", neck, neck - b, 1)
+            add("Inverse H&S", "LONG", neck, neck - b, b)
     # ascending / descending triangle
     if len(hi) >= 3 and len(lo) >= 3 and n - hi[-1][0] <= 30:
         h3, l3 = [p[1] for p in hi[-3:]], [p[1] for p in lo[-3:]]
         if near(max(h3), min(h3)) and l3[0] < l3[1] < l3[2]:
-            add("Ascending Triangle", "LONG", max(h3), max(h3) - l3[0], 1)
+            add("Ascending Triangle", "LONG", max(h3), max(h3) - l3[0], l3[2])
         if near(max(l3), min(l3)) and h3[0] > h3[1] > h3[2]:
-            add("Descending Triangle", "SHORT", min(l3), h3[0] - min(l3), 0)
+            add("Descending Triangle", "SHORT", min(l3), h3[0] - min(l3), h3[2])
     return out
 
 # ================= SIGNAL =================
-cache, last_alert, seen = {}, {}, {}
+hcache, last_alert, seen, stats = {}, {}, {}, {}
+
+def rej(why):
+    """Filter ne signal roka - count karo (log me dikhega), None return."""
+    stats[why] = stats.get(why, 0) + 1
+    return None
+
+def htf_df(pair, tf):
+    k, now = (pair, tf), time.time()
+    if k not in hcache or now - hcache[k][0] > HTF[tf]:
+        hcache[k] = (now, fetch(pair, tf, 200))
+    return hcache[k][1]
+
 def get_trends(pair):
-    tr, now = {}, time.time()
-    for tf, ttl in HTF.items():
-        k = (pair, tf)
-        if k not in cache or now - cache[k][0] > ttl:
-            cache[k] = (now, htf_trend(fetch(pair, tf, 120)))
-        tr[tf] = cache[k][1]
-    return tr
+    return {tf: htf_trend(htf_df(pair, tf)) for tf in HTF}
 
 def analyze(pair):
     df = fetch(pair, ALERT_TF, 250)
@@ -172,7 +201,9 @@ def analyze(pair):
     c = df.c; e9, e26 = ema(c, 9), ema(c, 26)
     st = supertrend(df); r = rsi(c); a = atr(df).iloc[-1]
     ml = ema(c, 12) - ema(c, 26); hist = ml - ema(ml, 9)
-    vol_ok = df.v.iloc[-1] > VOL_MULT * df.v.iloc[-21:-1].mean()
+    vavg = df.v.iloc[-21:-1].mean()
+    vr = df.v.iloc[-1] / vavg if vavg > 0 else 0
+    vol_ok = vr > VOL_MULT
     R, price = r.iloc[-1], c.iloc[-1]
     if np.isnan(R) or a <= 0: return None
     L = dict(EMA=e9.iloc[-1] > e26.iloc[-1] and price > e26.iloc[-1], Supertrend=st[-1] == 1,
@@ -181,30 +212,67 @@ def analyze(pair):
              RSI=30 <= R <= 50, MACD=hist.iloc[-1] < 0 and hist.iloc[-1] < hist.iloc[-2], Volume=vol_ok)
     sl_, ss_ = sum(L.values()), sum(S.values())
     side = None
-    if SEND_LONG and sl_ >= MIN_CONFIRM and sl_ > ss_ and R <= 72: side, ind = "LONG", L
-    elif SEND_SHORT and ss_ >= MIN_CONFIRM and ss_ > sl_ and R >= 28: side, ind = "SHORT", S
+    if SEND_LONG and sl_ >= MIN_CONFIRM and sl_ > ss_:
+        if R > LONG_RSI_MAX: return rej("RSI bahut high (LONG)")
+        side, ind = "LONG", L
+    elif SEND_SHORT and ss_ >= MIN_CONFIRM and ss_ > sl_:
+        if R < SHORT_RSI_MIN: return rej("RSI bahut low (SHORT)")
+        side, ind = "SHORT", S
     if not side: return None
     if time.time() - last_alert.get((pair, side), 0) < COOLDOWN_MIN * 60: return None
-    tr = get_trends(pair); want = 1 if side == "LONG" else -1
-    # 1h/4h/1d me se koi bhi against na ho aur kam se kam 2 saath ho
-    if any(v == -want for v in tr.values()) or sum(1 for v in tr.values() if v == want) < 2: return None
-    pats = detect_patterns(df)
-    if any(p["breakout"] and p["side"] != side for p in pats): return None
-    if REQUIRE_PATTERN and not any(p["side"] == side for p in pats): return None
-    # SL / targets
-    sw = df.tail(10)
-    if side == "LONG": sl = min(price - ATR_MULT * a, sw.l.min() - 0.2 * a)
-    else: sl = max(price + ATR_MULT * a, sw.h.max() + 0.2 * a)
-    risk = abs(price - sl); cap = price * MAX_RISK_PCT / 100
-    if risk > cap: risk = cap; sl = price - risk if side == "LONG" else price + risk
-    if risk < price * 0.002: return None
     sgn = 1 if side == "LONG" else -1
+
+    # ---- FILTER 3: pump candle / chasing / blow-off ----
+    last = df.iloc[-1]
+    rng, body = last.h - last.l, abs(last.c - last.o)
+    if vr > VOL_MAX: return rej("volume blow-off")
+    if rng > BIG_CANDLE_ATR * a or body > BIG_BODY_ATR * a: return rej("pump candle")
+    if abs(price - e26.iloc[-1]) > EXTENSION_ATR * a: return rej("price EMA se bahut door")
+    if (price - c.iloc[-6]) * sgn > RUN_ATR * a: return rej("tez run, late entry")
+
+    # ---- trend filter (1h / 4h / 1d) ----
+    tr = get_trends(pair); want = sgn
+    # 1h/4h/1d me se koi bhi against na ho aur kam se kam 2 saath ho
+    if any(v == -want for v in tr.values()) or sum(1 for v in tr.values() if v == want) < 2:
+        return rej("higher timeframe trend against")
+
+    # ---- FILTER 1: ulta pattern (forming ho ya breakout, dono block) ----
+    pats = detect_patterns(df)
+    opp = [p for p in pats if p["side"] != side]
+    if opp: return rej(f"ulta pattern: {opp[0]['name']}")
+    if REQUIRE_PATTERN and not any(p["side"] == side for p in pats): return rej("pattern nahi mila")
+
+    # ---- FILTER 4: 1h RSI extreme ----
+    h1 = htf_df(pair, "1h")
+    if h1 is not None and len(h1) > 20:
+        r1 = rsi(h1.c).iloc[-1]
+        if not np.isnan(r1):
+            if side == "LONG" and r1 > HTF_RSI_MAX: return rej("1h RSI overbought")
+            if side == "SHORT" and r1 < HTF_RSI_MIN: return rej("1h RSI oversold")
+
+    # ---- FILTER 5: structure SL (chhota nahi karte, zyada door ho to skip) ----
+    sw = df.tail(10)
+    if side == "LONG": sl = min(price - ATR_MULT * a, sw.l.min() - 0.25 * a)
+    else: sl = max(price + ATR_MULT * a, sw.h.max() + 0.25 * a)
+    risk = abs(price - sl)
+    if risk > price * MAX_RISK_PCT / 100: return rej("SL bahut door (risk zyada)")
+    if risk < price * 0.002: return rej("SL bahut paas")
     t1, t2 = price + sgn * T1_R * risk, price + sgn * T2_R * risk
+
+    # ---- FILTER 2: resistance / support T1 se pehle (15m + 1h levels) ----
     hi, lo = pivots(df)
-    res = [p[1] for p in hi if p[1] > price]; sup = [p[1] for p in lo if p[1] < price]
+    if h1 is not None and len(h1) > 20:
+        hi1, lo1 = pivots(h1.tail(150).reset_index(drop=True), 3)
+        hi, lo = hi + hi1, lo + lo1
+    res = [p[1] for p in hi if p[1] > price * 1.0005]
+    sup = [p[1] for p in lo if p[1] < price * 0.9995]
+    nres, nsup = (min(res) if res else None), (max(sup) if sup else None)
+    if side == "LONG" and nres is not None and nres < t1: return rej("resistance T1 se pehle")
+    if side == "SHORT" and nsup is not None and nsup > t1: return rej("support T1 se pehle")
+
     return dict(pair=pair, side=side, price=price, sl=sl, t1=t1, t2=t2, risk_pct=risk / price * 100,
                 ind=ind, score=max(sl_, ss_), rsi=R, trends=tr, pats=pats, df=df,
-                e9=e9, e26=e26, rsi_s=r, res=min(res) if res else None, sup=max(sup) if sup else None)
+                e9=e9, e26=e26, rsi_s=r, res=nres, sup=nsup)
 
 # ================= CHART + TELEGRAM =================
 def make_chart(s):
@@ -224,6 +292,8 @@ def make_chart(s):
     ax.plot(range(n), s["e26"].values[off:], color="#22c55e", lw=1, label="EMA 26")
     lv = [("Entry", s["price"], "#60a5fa"), ("SL", s["sl"], "#ef5350"),
           ("T1", s["t1"], "#2dd4bf"), ("T2", s["t2"], "#2dd4bf")]
+    if s["side"] == "LONG" and s["res"]: lv.append(("Res", s["res"], "#ffb74d"))
+    if s["side"] == "SHORT" and s["sup"]: lv.append(("Sup", s["sup"], "#ffb74d"))
     for name, v, col in lv:
         ax.axhline(v, color=col, ls="--", lw=1)
         ax.text(n + 0.5, v, f"{name} {fp(v)}", color=col, fontsize=8, va="center")
@@ -292,6 +362,7 @@ def coin_list():
 
 def scan():
     pairs = coin_list(); sent = 0
+    stats.clear()
     def work(p):
         try: return analyze(p)
         except Exception: traceback.print_exc(); return None
@@ -301,11 +372,13 @@ def scan():
     res.sort(key=lambda s: any(p["breakout"] and p["side"] == s["side"] for p in s["pats"]), reverse=True)
     for s in res[:MAX_ALERTS_PER_SCAN]:
         last_alert[(s["pair"], s["side"])] = time.time(); send(s); sent += 1
-    print(time.strftime("%H:%M:%S"), f"scanned {len(pairs)} coins, alerts {sent}", flush=True)
+    blocked = ", ".join(f"{k}: {v}" for k, v in sorted(stats.items(), key=lambda x: -x[1]))
+    print(time.strftime("%H:%M:%S"), f"scanned {len(pairs)} coins, alerts {sent}"
+          + (f" | roke gaye -> {blocked}" if blocked else ""), flush=True)
 
 def main():
     end = time.time() + RUN_MINUTES * 60
-    print(f"Bot start: alerts on {ALERT_TF}, trend filter {list(HTF)}, runs {RUN_MINUTES:.0f} min", flush=True)
+    print(f"Bot start (v2 filters): alerts on {ALERT_TF}, trend filter {list(HTF)}, runs {RUN_MINUTES:.0f} min", flush=True)
     while time.time() < end:
         t0 = time.time()
         try: scan()
@@ -314,4 +387,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
