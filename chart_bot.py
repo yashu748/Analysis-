@@ -375,4 +375,17 @@ def scan():
     for s in res[:MAX_ALERTS_PER_SCAN]:
         last_alert[(s["pair"], s["side"])] = time.time(); send(s); sent += 1
     blocked = ", ".join(f"{k}: {v}" for k, v in sorted(stats.items(), key=lambda x: -x[1]))
-    print(time
+    print(time.strftime("%H:%M:%S"), f"scanned {len(pairs)} coins, alerts {sent}"
+          + (f" | roke gaye -> {blocked}" if blocked else ""), flush=True)
+
+def main():
+    end = time.time() + RUN_MINUTES * 60
+    print(f"Bot start (v2 filters): alerts on {ALERT_TF}, trend filter {list(HTF)}, runs {RUN_MINUTES:.0f} min", flush=True)
+    while time.time() < end:
+        t0 = time.time()
+        try: scan()
+        except Exception: traceback.print_exc()
+        time.sleep(max(5, SCAN_EVERY - (time.time() - t0)))
+
+if __name__ == "__main__":
+    main()
