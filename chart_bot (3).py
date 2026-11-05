@@ -234,9 +234,9 @@ def analyze(pair):
 
     # ---- trend filter (1h / 4h / 1d) ----
     tr = get_trends(pair); want = sgn
-    # 1h/4h/1d me se koi bhi against na ho aur kam se kam 2 saath ho
-    if any(v == -want for v in tr.values()) or sum(1 for v in tr.values() if v == want) < 2:
-        return rej("higher timeframe trend against")
+    # 1h aur 4h against na hon, aur inme se kam se kam ek saath ho. 1d sirf caption me dikhta hai (block nahi karta)
+    if tr["1h"] == -want or tr["4h"] == -want or (tr["1h"] != want and tr["4h"] != want):
+        return rej("1h/4h trend saath nahi")
 
     # ---- FILTER 1: ulta pattern (forming ho ya breakout, dono block) ----
     pats = detect_patterns(df)
@@ -374,18 +374,4 @@ def scan():
     res.sort(key=lambda s: any(p["breakout"] and p["side"] == s["side"] for p in s["pats"]), reverse=True)
     for s in res[:MAX_ALERTS_PER_SCAN]:
         last_alert[(s["pair"], s["side"])] = time.time(); send(s); sent += 1
-    blocked = ", ".join(f"{k}: {v}" for k, v in sorted(stats.items(), key=lambda x: -x[1]))
-    print(time.strftime("%H:%M:%S"), f"scanned {len(pairs)} coins, alerts {sent}"
-          + (f" | roke gaye -> {blocked}" if blocked else ""), flush=True)
-
-def main():
-    end = time.time() + RUN_MINUTES * 60
-    print(f"Bot start (v2 filters): alerts on {ALERT_TF}, trend filter {list(HTF)}, runs {RUN_MINUTES:.0f} min", flush=True)
-    while time.time() < end:
-        t0 = time.time()
-        try: scan()
-        except Exception: traceback.print_exc()
-        time.sleep(max(5, SCAN_EVERY - (time.time() - t0)))
-
-if __name__ == "__main__":
-    main()
+    blocked = ", ".join(f"{k}: {v}" for k, v in sorted(stats.items(),
