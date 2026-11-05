@@ -4,12 +4,12 @@ Gate.io crypto chart-alert bot  (15m alerts, 1h/4h/1d trend filter, continuous l
 Telegram secrets: TG_TOKEN, TG_CHAT_ID
 
 v2 - galat signal rokne ke filters:
-  1. Ulta pattern block   : LONG par koi bhi bearish pattern (forming ya breakout) -> alert nahi
+  1. Ulta pattern block   : LONG par koi bhi bearish pattern  -> alert nahi
                             SHORT par koi bhi bullish pattern -> alert nahi
-  2. Resistance/Support   : entry ke 1R ke andar resistance (LONG) / support (SHORT) ho -> alert nahi (15m + 1h levels)
-  3. Pump candle block    : badi candle / EMA se door / tez run / volume blow-off -> alert nahi
+  2. Resistance/Support   : entry ke 1R ke andar resistance  / support  ho -> alert nahi (15m + 1h levels)
+  3. Pump candle block    : badi candle / EMA se door / tez run /  -> alert 
   4. RSI limit            : LONG RSI <= 62, SHORT RSI >= 38, 1h RSI extreme par bhi block
-  5. Structure SL         : SL swing low/high ke bahar, max risk 4% (zyada ho to alert skip, SL chhota nahi hota)
+  5. Structure SL         : SL swing low/high ke bahar, max risk 4% 
   6. Illiquid coin skip   : movers ke liye bhi minimum volume badhaya
 Har scan ke baad log me dikhta hai ki kaun sa filter kitne signal roka.
 """
