@@ -4,11 +4,11 @@ Gate.io crypto chart-alert bot  (15m alerts, 1h/4h/1d trend filter, continuous l
 Telegram secrets: TG_TOKEN, TG_CHAT_ID
 
 v2 - galat signal rokne ke filters:
-  1. Ulta pattern block   : LONG par koi bhi bearish pattern  -> alert nahi
-                            SHORT par koi bhi bullish pattern -> alert nahi
-  2. Resistance/Support   : entry ke 1R ke andar resistance  / support  ho -> alert nahi (15m + 1h levels)
+  1. Ulta pattern block   : LONG par koi bhi bearish pattern
+                            SHORT par koi bhi bullish pattern
+  2. Resistance/Support   : entry ke 1R ke andar resistance  / support  ho -> alert nahi 15m
   3. Pump candle block    : badi candle / EMA se door / tez run /  -> alert 
-  4. RSI limit            : LONG RSI <= 62, SHORT RSI >= 38, 1h RSI extreme par bhi block
+  4. RSI limit            : LONG RSI <= 62, SHORT RSI >= 38, 
   5. Structure SL         : SL swing low/high ke bahar, max risk 4% 
   6. Illiquid coin skip   : movers ke liye bhi minimum volume badhaya
 Har scan ke baad log me dikhta hai ki kaun sa filter kitne signal roka.
@@ -31,13 +31,13 @@ RUN_MINUTES = float(os.getenv("RUN_MINUTES", "350"))  # GitHub job limit is 6h
 MIN_VOL_USDT = 1_000_000                             # 24h volume filter
 MOVER_PCT, MOVER_MIN_VOL = 10.0, 600_000           # fast movers (bade volume wale)
 MAX_COINS = 250
-MIN_CONFIRM = 5                                    # out of 5 indicators (5 = sabhi)
+MIN_CONFIRM = 4                                    # out of 5 indicators (5 = sabhi)
 VOL_MULT = 2.0                                     # volume spike kitna bada ho
 VOL_MAX = 10.0                                     # isse bada volume = blow-off, skip
-REQUIRE_PATTERN = False                            # True = pattern bhi zaroori (bahut kam alert)
+REQUIRE_PATTERN = true                            # True = pattern bhi zaroori (bahut kam alert)
 MAX_ALERTS_PER_SCAN = 2                            # ek scan mein sirf top alerts
 MAX_ALERTS_PER_DAY = 6                             # 24 ghante me maximum itne alert (best quality wale)
-MIN_QUALITY = 75                                   # quality score (0-100) isse kam ho to alert nahi
+MIN_QUALITY = 65                                   # quality score (0-100) isse kam ho to alert nahi
 BTC_FILTER = True                                  # BTC 1h trend against ho to altcoin alert nahi
 TRACK_RESULTS = True                               # har alert ka SL/T1/T2 result Telegram par bhejo
 COOLDOWN_MIN = 360                                 # same coin+side repeat gap
@@ -46,7 +46,7 @@ T1_R, T2_R = 1.5, 3.0
 SEND_LONG, SEND_SHORT = True, True
 
 # --- v2 filter settings ---
-LONG_RSI_MAX, SHORT_RSI_MIN = 62, 38               # 15m RSI limit
+LONG_RSI_MAX, SHORT_RSI_MIN = 57, 38               # 15m RSI limit
 HTF_RSI_MAX, HTF_RSI_MIN = 70, 30                  # 1h RSI extreme
 RES_MIN_R = 1.0                                    # resistance/support kam se kam itne R door ho (1R = SL distance)
 
