@@ -34,7 +34,7 @@ MAX_COINS = 250
 MIN_CONFIRM = 4                                    # out of 5 indicators (5 = sabhi)
 VOL_MULT = 2.0                                     # volume spike kitna bada ho
 VOL_MAX = 10.0                                     # isse bada volume = blow-off, skip
-REQUIRE_PATTERN = true                            # True = pattern bhi zaroori (bahut kam alert)
+REQUIRE_PATTERN = True                            # True = pattern bhi zaroori (bahut kam alert)
 MAX_ALERTS_PER_SCAN = 2                            # ek scan mein sirf top alerts
 MAX_ALERTS_PER_DAY = 6                             # 24 ghante me maximum itne alert (best quality wale)
 MIN_QUALITY = 65                                   # quality score (0-100) isse kam ho to alert nahi
