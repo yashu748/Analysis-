@@ -33,6 +33,7 @@ COOLDOWN = 5
 WARM = 110
 REPLAY = 120
 RISK_PCT_TARGET = 1.0       # position size tip: ek trade me capital ka itna % risk
+MIN_RISK, MAX_RISK = 0.004, 0.20   # SL distance 0.4%-20% ke andar ho (backtest me bhi yahi limit thi)
 
 
 def prep(df):
@@ -77,10 +78,11 @@ def replay(F, sig, kind):
         if pos is None and sig[i] and i - last_sig >= COOLDOWN and F["atr"][i] > 0:
             entry = F["c"][i]
             risk = SL_ATR * F["atr"][i]
-            pos = dict(i=i, entry=entry, stop=entry - risk, risk=risk, best=entry)
             last_sig = i
-            if i == n - 1:
-                events.append(dict(type="entry", price=entry, stop=pos["stop"]))
+            if MIN_RISK <= risk / entry <= MAX_RISK:      # bahut door SL wale (pump) coin skip
+                pos = dict(i=i, entry=entry, stop=entry - risk, risk=risk, best=entry)
+                if i == n - 1:
+                    events.append(dict(type="entry", price=entry, stop=pos["stop"]))
     return events, pos, prev_stop
 
 
@@ -109,8 +111,8 @@ def main():
     closes = pd.DataFrame({p: DATA[p].set_index("t").c for p in DATA})
     rank = closes.pct_change(20).rank(axis=1, ascending=False)
 
-    new_msgs, exit_msgs, open_lines = [], [], []
-    n_open = 0
+    new_msgs, exit_msgs = [], []
+    open_map = {}
     for p, F in PRE.items():
         mom_rank = rank[p].reindex(DATA[p].t.values).values
         strategies = [
@@ -143,15 +145,20 @@ def main():
                                      f"Entry {fmt(ev['entry'])} -> Exit {fmt(ev['price'])}  "
                                      f"({ev['r']:+.2f}R, fees ke baad)")
             if pos is not None and pos["i"] != len(F["c"]) - 1:
-                n_open += 1
-                last = F["c"][-1]
-                chg = (last / pos["entry"] - 1) * 100
-                moved = " (SL upar gaya)" if prev_stop is not None and pos["stop"] > prev_stop * 1.0001 else ""
-                open_lines.append(f"{nm} {name}: entry {fmt(pos['entry'])}, ab {fmt(last)} ({chg:+.1f}%), "
-                                  f"SL {fmt(pos['stop'])}{moved}")
+                key = (nm, pos["entry"], round(pos["stop"], 10))
+                if key in open_map:
+                    open_map[key]["names"].append(name)          # donch20 aur donch55 same trade ho to ek line
+                else:
+                    last = F["c"][-1]
+                    chg = (last / pos["entry"] - 1) * 100
+                    moved = " (SL upar gaya)" if prev_stop is not None and pos["stop"] > prev_stop * 1.0001 else ""
+                    open_map[key] = dict(names=[name], text=f"entry {fmt(pos['entry'])}, ab {fmt(last)} ({chg:+.1f}%), "
+                                                            f"SL {fmt(pos['stop'])}{moved}")
 
     day = time.strftime("%Y-%m-%d", time.gmtime(float(list(DATA.values())[0].t.iloc[-1]))) if DATA else "?"
     msgs = new_msgs + exit_msgs
+    n_open = len(open_map)
+    open_lines = [f"{k[0]} {'+'.join(v['names'])}: {v['text']}" for k, v in open_map.items()]
     if open_lines:
         msgs.append(f"OPEN POSITIONS ({n_open}), candle {day}\n" + "\n".join(open_lines[:25]))
     if not msgs:
@@ -167,3 +174,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+  
