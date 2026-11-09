@@ -1,0 +1,24 @@
+name: Pattern bot
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "5 * * * *"
+concurrency:
+  group: pattern-bot
+  cancel-in-progress: false
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests pandas numpy matplotlib
+      - name: Run bot
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          RUN_MINUTES: "350"
+        run: python pattern_bot.py
