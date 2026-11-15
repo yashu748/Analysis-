@@ -3,14 +3,13 @@
 Gate.io crypto chart-alert bot  (15m alerts, 1h/4h/1d trend filter, continuous loop)
 Telegram secrets: TG_TOKEN, TG_CHAT_ID
 
-v2 - galat signal rokne ke filters:
-  1. Ulta pattern block   : LONG par koi bhi bearish pattern
-                            SHORT par koi bhi bullish pattern
-  2. Resistance/Support   : entry ke 1R ke andar resistance  / support  ho -> alert nahi 15m
-  3. Pump candle block    : badi candle / EMA se door / tez run /  -> alert 
-  4. RSI limit            : LONG RSI <= 62, SHORT RSI >= 38, 
-  5. Structure SL         : SL swing low/high ke bahar, max risk 4% 
-  6. Illiquid coin skip   : movers ke liye bhi minimum volume badhaya
+v3 = v2 filters + Gate-style zigzag W/M (Double Bottom / Double Top) neckline breakout
+  1. Ulta pattern block   : (safe mode) LONG par bearish pattern / SHORT par bullish pattern
+  2. Resistance/Support   : entry ke RES_MIN_R andar resistance/support ho -> alert nahi
+  3. Pump candle block    : badi candle / EMA se door / tez run -> alert nahi
+  4. RSI limit            : LONG RSI <= limit, SHORT RSI >= limit
+  5. Structure SL         : SL swing low/high ke bahar, max risk 4%
+  6. Illiquid coin skip   : minimum 24h volume
 Har scan ke baad log me dikhta hai ki kaun sa filter kitne signal roka.
 """
 import os, io, re, time, threading, traceback
@@ -28,32 +27,34 @@ ALERT_TF = "15m"                                   # alert + chart timeframe
 HTF = {"1h": 900, "4h": 1800, "1d": 7200}          # trend-filter TFs : cache seconds
 SCAN_EVERY = 120                                   # seconds between scans
 RUN_MINUTES = float(os.getenv("RUN_MINUTES", "350"))  # GitHub job limit is 6h
-MIN_VOL_USDT = 1_000_000                             # 24h volume filter
+MIN_VOL_USDT = 1_000_000                           # 24h volume filter
 MOVER_PCT, MOVER_MIN_VOL = 10.0, 600_000           # fast movers (bade volume wale)
 MAX_COINS = 250
 MIN_CONFIRM = 4                                    # out of 5 indicators (5 = sabhi)
 VOL_MULT = 2.0                                     # volume spike kitna bada ho
 VOL_MAX = 10.0                                     # isse bada volume = blow-off, skip
-REQUIRE_PATTERN = True                            # True = pattern bhi zaroori (bahut kam alert)
+REQUIRE_PATTERN = True                             # True = pattern bhi zaroori (bahut kam alert)
 MAX_ALERTS_PER_SCAN = 2                            # ek scan mein sirf top alerts
-MAX_ALERTS_PER_DAY = 6                             # 24 ghante me maximum itne alert (best quality wale)
+MAX_ALERTS_PER_DAY = 6                             # 24 ghante me maximum itne alert
 MIN_QUALITY = 65                                   # quality score (0-100) isse kam ho to alert nahi
 BTC_FILTER = True                                  # BTC 1h trend against ho to altcoin alert nahi
 TRACK_RESULTS = True                               # har alert ka SL/T1/T2 result Telegram par bhejo
+TRACK_EXPIRE_H = 48                                # itne ghante me kuch na ho to result "expired"
 COOLDOWN_MIN = 360                                 # same coin+side repeat gap
 ATR_MULT, MAX_RISK_PCT = 1.5, 4.0                  # SL settings (risk isse zyada = skip)
 T1_R, T2_R = 1.5, 3.0
 SEND_LONG, SEND_SHORT = True, True
+ZZ_PCT, ZZ_TOL = 0.012, 0.01                       # zigzag swing % aur double top/bottom tolerance
 
 # --- v2 filter settings ---
 LONG_RSI_MAX, SHORT_RSI_MIN = 57, 38               # 15m RSI limit
 HTF_RSI_MAX, HTF_RSI_MIN = 70, 30                  # 1h RSI extreme
-RES_MIN_R = 1.0                                    # resistance/support kam se kam itne R door ho (1R = SL distance)
+RES_MIN_R = 1.0                                    # resistance/support kam se kam itne R door ho
 
-# ---------- MODE: yahi ek line badalke strictness chuno ----------
+# ---------- MODE: env BOT_MODE se strictness chuno ----------
 #   "safe"     : sab filters ON (sabse kam alert, sabse achhi quality)
-#   "balanced" : resistance(0.5R) + RSI 66/34 + pump filter (dheela). Ulta pattern block NAHI (sirf caption me warning) <- default
-#   "loose"    : sirf trend/SL filter, pattern/resistance/pump block nahi (sabse zyada alert, purane jaisa)
+#   "balanced" : resistance(0.5R) + RSI 66/34 + pump filter. Ulta pattern block NAHI (caption me warning) <- default
+#   "loose"    : sirf trend/SL filter (sabse zyada alert)
 MODE = os.getenv("BOT_MODE", "balanced").lower()
 if MODE == "safe":
     USE_PUMP, USE_PATTERN, RES_MIN_R, LONG_RSI_MAX, SHORT_RSI_MIN = True, True, 1.0, 62, 38
@@ -144,6 +145,38 @@ def pivots(df, k=3):
         return out
     return dedupe(hi, True), dedupe(lo, False)
 
+# ---------- Gate-style zigzag W/M + neckline breakout ----------
+def zigzag(df, pct=0.012):
+    h, l = df.h.values, df.l.values
+    piv, trend, hi, lo = [], 0, (0, h[0]), (0, l[0])
+    for i in range(1, len(df)):
+        if h[i] > hi[1]: hi = (i, h[i])
+        if l[i] < lo[1]: lo = (i, l[i])
+        if trend <= 0 and h[i] > lo[1] * (1 + pct):
+            piv.append((lo[0], lo[1], "L")); trend = 1; hi = (i, h[i])
+        elif trend >= 0 and l[i] < hi[1] * (1 - pct):
+            piv.append((hi[0], hi[1], "H")); trend = -1; lo = (i, l[i])
+    return piv
+
+def zz_double(df, pct=ZZ_PCT, tol=ZZ_TOL):
+    out, n = [], len(df)
+    piv = zigzag(df, pct)
+    if len(piv) < 3: return out
+    (i1, p1, t1), (i2, p2, t2), (i3, p3, t3) = piv[-3:]
+    if n - i3 > 40: return out                       # pattern purana
+    close, prev = df.c.iloc[-1], df.c.iloc[-2]
+    if (t1, t2, t3) == ("L", "H", "L") and abs(p3 - p1) / max(p1, p3) <= tol:
+        neck, bot = p2, min(p1, p3)
+        if close >= bot * 0.997:                     # pattern fail nahi hua
+            out.append(dict(name="W Double Bottom", side="LONG", breakout=bool(close > neck),
+                            fresh=bool(close > neck >= prev), target=neck + (neck - bot), neck=neck))
+    elif (t1, t2, t3) == ("H", "L", "H") and abs(p3 - p1) / max(p1, p3) <= tol:
+        neck, top = p2, max(p1, p3)
+        if close <= top * 1.003:
+            out.append(dict(name="M Double Top", side="SHORT", breakout=bool(close < neck),
+                            fresh=bool(close < neck <= prev), target=neck - (top - neck), neck=neck))
+    return out
+
 def detect_patterns(df, tol=0.008):
     out, n = [], len(df)
     hi, lo = pivots(df); close = df.c.iloc[-1]
@@ -153,7 +186,6 @@ def detect_patterns(df, tol=0.008):
     def between_max(i, j): return df.h.values[i:j+1].max()
     def add(name, side, neck, height, lvl):
         # lvl = pattern invalidation level (SHORT: pattern ka top, LONG: pattern ka bottom)
-        # price uske bahar nikal chuka ho to pattern fail ho gaya - ignore
         if side == "SHORT" and close > lvl * 1.003: return
         if side == "LONG" and close < lvl * 0.997: return
         brk = close < neck if side == "SHORT" else close > neck
@@ -214,6 +246,7 @@ def detect_patterns(df, tol=0.008):
                     elif sh < 0 and sw_ > 0:
                         if close > up_line: add("Symmetrical Triangle", "LONG", up_line, width0, lo_line)
                         elif close < lo_line: add("Symmetrical Triangle", "SHORT", lo_line, width0, up_line)
+    out += zz_double(df)                              # <-- naya: Gate-style W / M
     return out
 
 # ================= SIGNAL =================
@@ -260,7 +293,7 @@ def analyze(pair):
         if R < SHORT_RSI_MIN: return rej("RSI bahut low (SHORT)")
         side, ind = "SHORT", S
     if not side: return None
-    stats["[candidate] 5/5 setup mila"] = stats.get("[candidate] 5/5 setup mila", 0) + 1
+    stats["[candidate] setup mila"] = stats.get("[candidate] setup mila", 0) + 1
     if time.time() - last_alert.get((pair, side), 0) < COOLDOWN_MIN * 60: return None
     sgn = 1 if side == "LONG" else -1
 
@@ -275,7 +308,7 @@ def analyze(pair):
 
     # ---- trend filter (1h / 4h / 1d) ----
     tr = get_trends(pair); want = sgn
-    # 1h aur 4h against na hon, aur inme se kam se kam ek saath ho. 1d sirf caption me dikhta hai (block nahi karta)
+    # 1h aur 4h against na hon, aur inme se kam se kam ek saath ho. 1d sirf caption me dikhta hai
     if tr["1h"] == -want or tr["4h"] == -want or (tr["1h"] != want and tr["4h"] != want):
         return rej("1h/4h trend saath nahi")
 
@@ -285,7 +318,7 @@ def analyze(pair):
         btc_tr = htf_trend(htf_df("BTC_USDT", "1h"))
         if btc_tr == -want: return rej("BTC trend against")
 
-    # ---- FILTER 1: ulta pattern (forming ho ya breakout, dono block) ----
+    # ---- FILTER 1: ulta pattern ----
     pats = detect_patterns(df)
     opp = [p for p in pats if p["side"] != side]
     if USE_PATTERN and opp: return rej(f"ulta pattern: {opp[0]['name']}")
@@ -299,7 +332,7 @@ def analyze(pair):
             if side == "LONG" and r1 > HTF_RSI_MAX: return rej("1h RSI overbought")
             if side == "SHORT" and r1 < HTF_RSI_MIN: return rej("1h RSI oversold")
 
-    # ---- FILTER 5: structure SL (chhota nahi karte, zyada door ho to skip) ----
+    # ---- FILTER 5: structure SL ----
     sw = df.tail(10)
     if side == "LONG": sl = min(price - ATR_MULT * a, sw.l.min() - 0.25 * a)
     else: sl = max(price + ATR_MULT * a, sw.h.max() + 0.25 * a)
@@ -308,7 +341,7 @@ def analyze(pair):
     if risk < price * 0.002: return rej("SL bahut paas")
     t1, t2 = price + sgn * T1_R * risk, price + sgn * T2_R * risk
 
-    # ---- FILTER 2: resistance / support T1 se pehle (15m + 1h levels) ----
+    # ---- FILTER 2: resistance / support (15m + 1h levels) ----
     hi, lo = pivots(df)
     if h1 is not None and len(h1) > 20:
         hi1, lo1 = pivots(h1.tail(150).reset_index(drop=True), 3)
@@ -323,6 +356,7 @@ def analyze(pair):
     q = 40 + 6 * sum(1 for v in tr.values() if v == want)
     same = [p_ for p_ in pats if p_["side"] == side]
     if same: q += 8 + (6 if any(p_["breakout"] for p_ in same) else 0)
+    if any(p_.get("fresh") for p_ in same) and vr >= 1.5: q += 6      # taaza neckline breakout + volume
     lvl = nres if side == "LONG" else nsup
     dist = None if lvl is None else abs(lvl - price)
     if dist is None or dist >= 3 * risk: q += 12
@@ -336,7 +370,7 @@ def analyze(pair):
 
     return dict(pair=pair, side=side, price=price, sl=sl, t1=t1, t2=t2, risk_pct=risk / price * 100,
                 ind=ind, score=max(sl_, ss_), q=q, rsi=R, trends=tr, pats=pats, df=df,
-                e9=e9, e26=e26, rsi_s=r, res=nres, sup=nsup)
+                e9=e9, e26=e26, rsi_s=r, res=nres, sup=nsup, opp=opp, vr=vr)
 
 # ================= CHART + TELEGRAM =================
 def make_chart(s):
@@ -358,6 +392,8 @@ def make_chart(s):
           ("T1", s["t1"], "#2dd4bf"), ("T2", s["t2"], "#2dd4bf")]
     if s["side"] == "LONG" and s["res"]: lv.append(("Res", s["res"], "#ffb74d"))
     if s["side"] == "SHORT" and s["sup"]: lv.append(("Sup", s["sup"], "#ffb74d"))
+    for p_ in s["pats"]:                              # neckline (Gate jaisi dashed line)
+        if p_.get("neck") and p_["side"] == s["side"]: lv.append(("Neck", p_["neck"], "#fbbf24"))
     for name, v, col in lv:
         ax.axhline(v, color=col, ls="--", lw=1)
         ax.text(n + 0.5, v, f"{name} {fp(v)}", color=col, fontsize=8, va="center")
@@ -374,145 +410,170 @@ def make_chart(s):
     ar.plot(range(n), s["rsi_s"].values[off:], color="#fbbf24", lw=1)
     for y in (30, 70): ar.axhline(y, color="#6b7280", ls="--", lw=0.8)
     ar.set_ylim(0, 100); ar.set_ylabel("RSI 14", color="#9ca3af", fontsize=8)
-    buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=110, facecolor=bg, bbox_inches="tight")
-    plt.close(fig); buf.seek(0); return buf
-
-def caption(s):
-    ok = lambda k: "✅" if s["ind"][k] else "❌"
-    arrow = {1: "⬆️", -1: "⬇️", 0: "➖"}
-    t = [f"{s['pair']}  {s['side']} setup ({ALERT_TF})",
-         f"Entry ~{fp(s['price'])}",
-         f"SL {fp(s['sl'])}  ({'-' if s['side']=='LONG' else '+'}{s['risk_pct']:.1f}%)",
-         f"T1 {fp(s['t1'])} ({T1_R}R)  |  T2 {fp(s['t2'])} ({T2_R}R)", "",
-         "Indicators: " + " ".join(f"{ok(k)}{k}" for k in s["ind"]) + f"  (RSI {s['rsi']:.0f})",
-         "Trend: " + "  ".join(f"{tf} {arrow[v]}" for tf, v in s["trends"].items()),
-         f"Quality: {s['q']}/100"]
-    if s["side"] == "LONG" and s["res"]: t.append(f"Upar resistance: {fp(s['res'])}")
-    if s["side"] == "SHORT" and s["sup"]: t.append(f"Neeche support: {fp(s['sup'])}")
-    if s["pats"]:
-        t += ["", "📐 Patterns:"]
-        for p in s["pats"]:
-            t.append(f"{'🟢' if p['side']=='LONG' else '🔴'} {p['name']} - "
-                     f"{'BREAKOUT ✅' if p['breakout'] else 'forming ⏳'} | tgt {fp(p['target'])}")
-    opp = [p for p in s["pats"] if p["side"] != s["side"]]
-    if opp: t += ["", f"\u26a0\ufe0f Dhyan: ulta pattern bhi hai ({opp[0]['name']}), size chhota rakho"]
-    t += ["", "T1 par 50% book, SL entry par. Alert hai, advice nahi. SL zaroor lagao."]
-    if s["side"] == "SHORT": t[-1] += " Short ke liye futures/perp chahiye."
-    return "\n".join(t)
-
-def send(s):
-    if not TG_TOKEN or not TG_CHAT: print("Telegram secrets missing"); return
-    cap, api = caption(s), f"https://api.telegram.org/bot{TG_TOKEN}"
-    try:
-        img = make_chart(s)
-        r = requests.post(f"{api}/sendPhoto", data={"chat_id": TG_CHAT, "caption": cap[:1024]},
-                          files={"photo": ("chart.png", img)}, timeout=30)
-        if r.status_code != 200: raise RuntimeError(r.text)
-        if len(cap) > 1024: requests.post(f"{api}/sendMessage", data={"chat_id": TG_CHAT, "text": cap}, timeout=20)
-    except Exception as e:
-        print("photo failed:", e)
-        requests.post(f"{api}/sendMessage", data={"chat_id": TG_CHAT, "text": cap}, timeout=20)
-
-# ================= RESULT TRACKER =================
-open_trades, tally, day_alerts = [], {"W": 0, "L": 0, "R": 0.0}, []
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=110, facecolor=bg, bbox_inches="tight")
+    plt.close(fig); buf.seek(0)
+    return buf
 
 def tg_text(text):
-    if not TG_TOKEN or not TG_CHAT: print(text); return
     try:
         requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                       data={"chat_id": TG_CHAT, "text": text}, timeout=20)
-    except Exception as e:
-        print("tg_text failed:", e)
+    except Exception:
+        traceback.print_exc()
 
-def evaluate(tr_, candles):
-    """Alert ke baad ki candles chalao. Same candle me SL aur target dono touch ho to SL pehle maana jata hai (conservative).
-    Return (result, r_value) ya None agar abhi trade open hai. result: SL / T1+BE / T2"""
-    sgn = 1 if tr_["side"] == "LONG" else -1
-    for row in candles.itertuples():
-        adverse = (row.l <= tr_["stop"]) if sgn == 1 else (row.h >= tr_["stop"])
-        hit1 = (row.h >= tr_["t1"]) if sgn == 1 else (row.l <= tr_["t1"])
-        hit2 = (row.h >= tr_["t2"]) if sgn == 1 else (row.l <= tr_["t2"])
-        if not tr_["t1_hit"]:
-            if adverse: return "SL", -1.0
-            if hit1:
-                tr_["t1_hit"], tr_["stop"] = True, tr_["entry"]
-                tg_text(f"T1 hit: {tr_['pair']} {tr_['side']} - 50% book karo, SL entry par kar do")
-                if hit2: return "T2", T1_R * 0.5 + T2_R * 0.5
-        else:
-            if adverse: return "T1+BE", T1_R * 0.5
-            if hit2: return "T2", T1_R * 0.5 + T2_R * 0.5
-    return None
+def tg_photo(buf, caption):
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
+                          data={"chat_id": TG_CHAT, "caption": caption[:1000]},
+                          files={"photo": ("chart.png", buf, "image/png")}, timeout=40)
+        if r.status_code != 200:
+            print("Telegram photo error:", r.status_code, r.text[:200])
+            tg_text(caption)
+    except Exception:
+        traceback.print_exc()
+        tg_text(caption)
 
-def track_results():
+def caption(s):
+    arrow = "🟢 LONG" if s["side"] == "LONG" else "🔴 SHORT"
+    tmap = {1: "UP", -1: "DOWN", 0: "side"}
+    tr = "  ".join(f"{k}:{tmap[v]}" for k, v in s["trends"].items())
+    pats = ", ".join(f"{p['name']}{' ✔breakout' if p['breakout'] else ''}" for p in s["pats"] if p["side"] == s["side"])
+    lines = [f"{arrow}  {s['pair']}  ({ALERT_TF})",
+             f"Entry: {fp(s['price'])}",
+             f"SL: {fp(s['sl'])}  ({s['risk_pct']:.2f}% risk)",
+             f"T1: {fp(s['t1'])}  ({T1_R}R)",
+             f"T2: {fp(s['t2'])}  ({T2_R}R)",
+             f"Quality: {s['q']}/100   Confirm: {s['score']}/5   RSI: {s['rsi']:.0f}",
+             f"Trend: {tr}",
+             f"Volume: {s['vr']:.1f}x"]
+    if pats: lines.append(f"Pattern: {pats}")
+    if s["opp"]:
+        lines.append("⚠️ Ulta pattern bhi hai: " + ", ".join(p["name"] for p in s["opp"]))
+    lines.append(f"Mode: {MODE}")
+    lines.append("Sirf analysis hai, financial advice nahi. SL zaroor lagayein.")
+    return "\n".join(lines)
+
+# ================= TRACKING =================
+active, alert_times = [], []
+tally = {"T2": 0, "T1_then_SL": 0, "SL": 0, "expired": 0}
+
+def alerts_last_24h():
     now = time.time()
-    for tr_ in list(open_trades):
-        df = fetch(tr_["pair"], ALERT_TF, 120)
-        if df is None: continue
-        res = evaluate(tr_, df[df.t >= tr_["since"]])
-        if res is None and now - tr_["since"] > 24 * 3600:
-            res = ("expire", 0.0)
-        if res is None: continue
-        open_trades.remove(tr_)
-        name, rv = res
-        if name == "expire":
-            tg_text(f"Expire: {tr_['pair']} {tr_['side']} - 24 ghante me na SL na T1 hit hua")
+    alert_times[:] = [t for t in alert_times if now - t < 86400]
+    return len(alert_times)
+
+def send_alert(s):
+    try:
+        tg_photo(make_chart(s), caption(s))
+    except Exception:
+        traceback.print_exc(); tg_text(caption(s))
+    last_alert[(s["pair"], s["side"])] = time.time()
+    alert_times.append(time.time())
+    print(f"ALERT {s['side']} {s['pair']} q={s['q']}")
+    if TRACK_RESULTS:
+        active.append(dict(pair=s["pair"], side=s["side"], entry=s["price"], sl=s["sl"], t1=s["t1"], t2=s["t2"],
+                           ts=float(s["df"].t.iloc[-1]), t0=time.time(), t1_hit=False))
+
+def tally_text():
+    return (f"Score: T2 {tally['T2']} | T1 phir SL {tally['T1_then_SL']} | "
+            f"SL {tally['SL']} | expired {tally['expired']}")
+
+def check_trades():
+    if not TRACK_RESULTS: return
+    for tr in list(active):
+        if time.time() - tr["t0"] > TRACK_EXPIRE_H * 3600:
+            active.remove(tr); tally["expired"] += 1
+            tg_text(f"⏱ {tr['pair']} {tr['side']}: {TRACK_EXPIRE_H}h me na SL na T2 hua.\n{tally_text()}")
             continue
-        tally["R"] += rv
-        if rv > 0: tally["W"] += 1
-        else: tally["L"] += 1
-        tot = tally["W"] + tally["L"]
-        icon = "\u274c" if name == "SL" else "\u2705"
-        tg_text(f"{icon} Result: {tr_['pair']} {tr_['side']} - {name} ({rv:+.2f}R)\n"
-                f"Total: {tally['W']} win / {tally['L']} loss ({tally['W'] / tot * 100:.0f}%), net {tally['R']:+.2f}R")
+        df = fetch(tr["pair"], ALERT_TF, 200)
+        if df is None: continue
+        new = df[df.t > tr["ts"]]
+        done = False
+        for _, row in new.iterrows():
+            tr["ts"] = float(row.t)
+            long_ = tr["side"] == "LONG"
+            hit_sl = row.l <= tr["sl"] if long_ else row.h >= tr["sl"]
+            hit_t1 = row.h >= tr["t1"] if long_ else row.l <= tr["t1"]
+            hit_t2 = row.h >= tr["t2"] if long_ else row.l <= tr["t2"]
+            if hit_sl:                                  # conservative: ek hi candle me dono to SL pehle maana
+                if tr["t1_hit"]:
+                    tally["T1_then_SL"] += 1
+                    msg = f"⚠️ {tr['pair']} {tr['side']}: T1 hit hua tha, phir SL aaya."
+                else:
+                    tally["SL"] += 1
+                    msg = f"❌ {tr['pair']} {tr['side']}: SL hit ({fp(tr['sl'])})."
+                done = True
+            elif hit_t2:
+                tally["T2"] += 1
+                msg = f"✅ {tr['pair']} {tr['side']}: T2 hit ({fp(tr['t2'])})."
+                done = True
+            elif hit_t1 and not tr["t1_hit"]:
+                tr["t1_hit"] = True
+                tg_text(f"🎯 {tr['pair']} {tr['side']}: T1 hit ({fp(tr['t1'])}).")
+            if done:
+                tg_text(msg + "\n" + tally_text())
+                active.remove(tr)
+                break
 
 # ================= SCAN LOOP =================
-def coin_list():
-    tk = get(f"{BASE}/spot/tickers") or []
-    out = []
-    for x in tk:
-        p = x.get("currency_pair", "")
-        if not p.endswith("_USDT") or p.split("_")[0] in STABLE: continue
-        if re.search(r"(3L|3S|5L|5S|UP|DOWN|BULL|BEAR)_USDT$", p): continue
-        try: v, ch = float(x.get("quote_volume") or 0), abs(float(x.get("change_percentage") or 0))
-        except ValueError: continue
-        if v >= MIN_VOL_USDT or (ch >= MOVER_PCT and v >= MOVER_MIN_VOL): out.append((v, p))
-    out.sort(reverse=True)
-    return [p for _, p in out[:MAX_COINS]]
+def get_pairs():
+    r = get(f"{BASE}/spot/tickers")
+    if not r: return []
+    movers, normal = [], []
+    for t in r:
+        p = t.get("currency_pair", "")
+        if not p.endswith("_USDT"): continue
+        base = p[:-5]
+        if base in STABLE or re.search(r"(3L|3S|5L|5S)$", base): continue
+        try:
+            vol = float(t.get("quote_volume") or 0)
+            chg = abs(float(t.get("change_percentage") or 0))
+        except Exception:
+            continue
+        if chg >= MOVER_PCT and vol >= MOVER_MIN_VOL: movers.append((vol, p))
+        elif vol >= MIN_VOL_USDT: normal.append((vol, p))
+    movers.sort(reverse=True); normal.sort(reverse=True)
+    return [p for _, p in movers + normal][:MAX_COINS]
+
+def safe_analyze(pair):
+    try:
+        return analyze(pair)
+    except Exception:
+        traceback.print_exc()
+        return None
 
 def scan():
-    pairs = coin_list(); sent = 0
-    stats.clear()
-    def work(p):
-        try: return analyze(p)
-        except Exception: traceback.print_exc(); return None
-    with ThreadPoolExecutor(6) as ex:
-        res = [s for s in ex.map(work, pairs) if s]
-    # best quality pehle: pattern breakout wale, phir bade volume wale
-    res.sort(key=lambda s: s["q"], reverse=True)
-    now = time.time()
-    day_alerts[:] = [t for t in day_alerts if now - t < 24 * 3600]
-    room = max(0, MAX_ALERTS_PER_DAY - len(day_alerts))
-    if res and room == 0: stats["daily limit poori (6/24h)"] = len(res)
-    for s in res[:min(MAX_ALERTS_PER_SCAN, room)]:
-        last_alert[(s["pair"], s["side"])] = now; day_alerts.append(now); send(s); sent += 1
-        if TRACK_RESULTS:
-            open_trades.append(dict(pair=s["pair"], side=s["side"], entry=s["price"], stop=s["sl"],
-                                    t1=s["t1"], t2=s["t2"], since=float(s["df"].t.iloc[-1]) + 900, t1_hit=False))
-    if TRACK_RESULTS and open_trades:
-        try: track_results()
-        except Exception: traceback.print_exc()
-    blocked = ", ".join(f"{k}: {v}" for k, v in sorted(stats.items(), key=lambda x: -x[1]))
-    print(time.strftime("%H:%M:%S"), f"scanned {len(pairs)} coins, alerts {sent} (24h: {len(day_alerts)}/{MAX_ALERTS_PER_DAY}), open {len(open_trades)}"
-          + (f" | roke gaye -> {blocked}" if blocked else ""), flush=True)
+    pairs = get_pairs()
+    print(f"[{time.strftime('%H:%M:%S')}] scanning {len(pairs)} coins | mode={MODE}")
+    if not pairs: return
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(safe_analyze, pairs))
+    sigs = sorted([x for x in results if x], key=lambda s: s["q"], reverse=True)
+    sent = 0
+    for s in sigs:
+        if sent >= MAX_ALERTS_PER_SCAN: break
+        if alerts_last_24h() >= MAX_ALERTS_PER_DAY:
+            print("daily alert limit reached"); break
+        send_alert(s); sent += 1
+    if stats:
+        print("filter stats:", dict(sorted(stats.items(), key=lambda kv: -kv[1])))
+        stats.clear()
 
 def main():
+    if not TG_TOKEN or not TG_CHAT:
+        print("ERROR: TG_TOKEN / TG_CHAT_ID secrets set nahi hain"); return
     end = time.time() + RUN_MINUTES * 60
-    print(f"Bot start (v2 filters, mode={MODE}): alerts on {ALERT_TF}, trend filter {list(HTF)}, runs {RUN_MINUTES:.0f} min", flush=True)
+    tg_text(f"🤖 Chart bot start ({ALERT_TF}, mode={MODE}). Max {MAX_ALERTS_PER_DAY} alerts/day, "
+            f"min quality {MIN_QUALITY}.")
     while time.time() < end:
         t0 = time.time()
         try: scan()
         except Exception: traceback.print_exc()
+        try: check_trades()
+        except Exception: traceback.print_exc()
         time.sleep(max(5, SCAN_EVERY - (time.time() - t0)))
+    tg_text("🛑 Bot run khatam (next run workflow se).\n" + tally_text())
 
 if __name__ == "__main__":
     main()
