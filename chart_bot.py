@@ -574,6 +574,7 @@ def main():
         except Exception: traceback.print_exc()
         time.sleep(max(5, SCAN_EVERY - (time.time() - t0)))
     tg_text("🛑 Bot run khatam (next run workflow se).\n" + tally_text())
-
+def coin_list():
+    return get_pairs()
 if __name__ == "__main__":
     main()
