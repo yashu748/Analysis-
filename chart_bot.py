@@ -3,6 +3,11 @@
 Gate.io crypto chart-alert bot  (15m alerts, 1h/4h/1d trend filter, continuous loop)
 Telegram secrets: TG_TOKEN, TG_CHAT_ID
 
+v4 = v3 + PnL tracking
+  - Har trade band hone par (SL / T1 phir SL / T2 / expired) kitna WIN ya LOSS hua (R aur USDT) batata hai
+  - Saath me pichhle 48 ghante (2 din) ka total: win amount, loss amount, net
+  - Result results.json me save hota hai, open trades active.json me (restart ke baad bhi chalte rahenge)
+
 v3 = v2 filters + Gate-style zigzag W/M (Double Bottom / Double Top) neckline breakout
   1. Ulta pattern block   : (safe mode) LONG par bearish pattern / SHORT par bullish pattern
   2. Resistance/Support   : entry ke RES_MIN_R andar resistance/support ho -> alert nahi
@@ -12,7 +17,8 @@ v3 = v2 filters + Gate-style zigzag W/M (Double Bottom / Double Top) neckline br
   6. Illiquid coin skip   : minimum 24h volume
 Har scan ke baad log me dikhta hai ki kaun sa filter kitne signal roka.
 """
-import os, io, re, time, threading, traceback
+import os, io, re, json, time, threading, traceback
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import requests, numpy as np, pandas as pd
 import matplotlib
@@ -45,6 +51,16 @@ ATR_MULT, MAX_RISK_PCT = 1.5, 4.0                  # SL settings (risk isse zyad
 T1_R, T2_R = 1.5, 3.0
 SEND_LONG, SEND_SHORT = True, True
 ZZ_PCT, ZZ_TOL = 0.012, 0.01                       # zigzag swing % aur double top/bottom tolerance
+
+# --- PnL tracking settings ---
+RISK_USDT = float(os.getenv("RISK_USDT", "10"))    # 1R = itne USDT (SL hit par itna loss). Apne hisaab se badlo
+T1_BOOK = 0.5                                      # T1 par kitna hissa book (0.5 = 50%)
+MOVE_SL_TO_ENTRY_AFTER_T1 = True                   # True: T1 ke baad bacha hissa entry par SL (break-even)
+                                                   # False: T1 ke baad bhi original SL (tab T1 phir SL = +0.25R)
+WINDOW_HOURS = 48                                  # total kitne ghante ka dikhana hai (2 din)
+KEEP_DAYS = 14                                     # results file me purana data kitne din rakhna
+RESULTS_FILE = Path(os.getenv("RESULTS_FILE", "results.json"))
+ACTIVE_FILE = Path(os.getenv("ACTIVE_FILE", "active.json"))
 
 # --- v2 filter settings ---
 LONG_RSI_MAX, SHORT_RSI_MIN = 57, 38               # 15m RSI limit
@@ -454,9 +470,95 @@ def caption(s):
     lines.append("Sirf analysis hai, financial advice nahi. SL zaroor lagayein.")
     return "\n".join(lines)
 
+# ================= PnL (win / loss amount + 48h total) =================
+# Rules (T1 par T1_BOOK hissa book, bacha hua SL / T2 tak):
+#   SL                 -> -1R
+#   T1 phir SL         -> T1_BOOK*T1_R + (1-T1_BOOK)*(R at SL level)  [SL entry par ho to +0.75R]
+#   T1 phir expired    -> T1_BOOK*T1_R  (bacha hissa entry par band maana)
+#   T2                 -> T1_BOOK*T1_R + (1-T1_BOOK)*T2_R             [+2.25R]
+#   expired (T1 nahi)  -> 0
+# Fees/slippage shamil nahi hain.
+OUTCOME_LABEL = {
+    "SL": "SL hit",
+    "T1_SL": "T1 hit tha, phir SL",
+    "T1_EXP": f"T1 hit tha, phir {TRACK_EXPIRE_H}h me kuch nahi",
+    "T2": "T2 hit",
+    "EXPIRED": f"{TRACK_EXPIRE_H}h me na SL na T1/T2 (expired)",
+}
+
+def _jload(path):
+    try:
+        return json.loads(Path(path).read_text())
+    except Exception:
+        return []
+
+def _jsave(path, data):
+    try:
+        Path(path).write_text(json.dumps(data, indent=1))
+    except Exception:
+        traceback.print_exc()
+
+def save_active():
+    _jsave(ACTIVE_FILE, active)
+
+def money(x):
+    return f"{'+' if x >= 0 else '-'}${abs(x):.2f}"
+
+def _r_at(side, entry, sl, price):
+    risk = abs(entry - sl)
+    if risk == 0: return 0.0
+    move = (price - entry) if side == "LONG" else (entry - price)
+    return move / risk
+
+def calc_r(tr, outcome, exit2=None):
+    side, e, sl, t1, t2 = tr["side"], tr["entry"], tr["sl"], tr["t1"], tr["t2"]
+    if outcome == "SL": return -1.0
+    if outcome == "T1_SL":
+        return T1_BOOK * _r_at(side, e, sl, t1) + (1 - T1_BOOK) * _r_at(side, e, sl, e if exit2 is None else exit2)
+    if outcome == "T1_EXP": return T1_BOOK * _r_at(side, e, sl, t1)
+    if outcome == "T2": return T1_BOOK * _r_at(side, e, sl, t1) + (1 - T1_BOOK) * _r_at(side, e, sl, t2)
+    return 0.0                                          # EXPIRED
+
+def record_result(tr, outcome, exit2=None):
+    """Result results.json me save karta hai aur row return karta hai. Duplicate id ho to None."""
+    rows = _jload(RESULTS_FILE)
+    if any(r.get("id") == tr["id"] for r in rows): return None
+    r = calc_r(tr, outcome, exit2)
+    row = dict(id=tr["id"], ts=time.time(), pair=tr["pair"], side=tr["side"], entry=tr["entry"],
+               sl=tr["sl"], t1=tr["t1"], t2=tr["t2"], outcome=outcome, r=round(r, 3),
+               pnl=round(r * RISK_USDT, 2))
+    rows.append(row)
+    cutoff = time.time() - KEEP_DAYS * 86400
+    _jsave(RESULTS_FILE, [x for x in rows if x.get("ts", 0) >= cutoff])
+    return row
+
+def pnl_line(row):
+    if not row: return ""
+    return f"Result: {row['r']:+.2f}R = {money(row['pnl'])}  (1R = ${RISK_USDT:g})"
+
+def summary_text(hours=WINDOW_HOURS):
+    cutoff = time.time() - hours * 3600
+    rows = [r for r in _jload(RESULTS_FILE) if r.get("ts", 0) >= cutoff]
+    days = hours / 24
+    if not rows:
+        return f"📊 Pichhle {days:g} din: abhi koi closed trade nahi."
+    wins = [r for r in rows if r["pnl"] > 0]
+    losses = [r for r in rows if r["pnl"] < 0]
+    flat = len(rows) - len(wins) - len(losses)
+    win_amt, loss_amt = sum(r["pnl"] for r in wins), sum(r["pnl"] for r in losses)
+    net, net_r = win_amt + loss_amt, sum(r["r"] for r in rows)
+    cnt = lambda *k: sum(1 for r in rows if r["outcome"] in k)
+    return "\n".join([
+        f"📊 Pichhle {days:g} din ka hisaab",
+        f"Trades: {len(rows)} | Win: {len(wins)} | Loss: {len(losses)} | Flat: {flat}",
+        f"Win amount:  {money(win_amt)}",
+        f"Loss amount: {money(loss_amt)}",
+        f"TOTAL: {money(net)} ({net_r:+.2f}R) | Win rate {100 * len(wins) / len(rows):.0f}%",
+        f"Score: T2 {cnt('T2')} | T1 phir SL {cnt('T1_SL')} | SL {cnt('SL')} | expired {cnt('EXPIRED', 'T1_EXP')}",
+    ])
+
 # ================= TRACKING =================
 active, alert_times = [], []
-tally = {"T2": 0, "T1_then_SL": 0, "SL": 0, "expired": 0}
 
 def alerts_last_24h():
     now = time.time()
@@ -472,49 +574,56 @@ def send_alert(s):
     alert_times.append(time.time())
     print(f"ALERT {s['side']} {s['pair']} q={s['q']}")
     if TRACK_RESULTS:
-        active.append(dict(pair=s["pair"], side=s["side"], entry=s["price"], sl=s["sl"], t1=s["t1"], t2=s["t2"],
+        active.append(dict(id=f"{s['pair']}_{s['side']}_{int(time.time())}", pair=s["pair"], side=s["side"],
+                           entry=s["price"], sl=s["sl"], t1=s["t1"], t2=s["t2"],
                            ts=float(s["df"].t.iloc[-1]), t0=time.time(), t1_hit=False))
-
-def tally_text():
-    return (f"Score: T2 {tally['T2']} | T1 phir SL {tally['T1_then_SL']} | "
-            f"SL {tally['SL']} | expired {tally['expired']}")
+        save_active()
 
 def check_trades():
     if not TRACK_RESULTS: return
+    changed = False
     for tr in list(active):
         if time.time() - tr["t0"] > TRACK_EXPIRE_H * 3600:
-            active.remove(tr); tally["expired"] += 1
-            tg_text(f"⏱ {tr['pair']} {tr['side']}: {TRACK_EXPIRE_H}h me na SL na T2 hua.\n{tally_text()}")
+            active.remove(tr); changed = True
+            out = "T1_EXP" if tr["t1_hit"] else "EXPIRED"
+            res = record_result(tr, out)
+            tg_text(f"⏱ {tr['pair']} {tr['side']}: {OUTCOME_LABEL[out]}.\n{pnl_line(res)}\n\n{summary_text()}")
             continue
         df = fetch(tr["pair"], ALERT_TF, 200)
         if df is None: continue
         new = df[df.t > tr["ts"]]
         done = False
         for _, row in new.iterrows():
-            tr["ts"] = float(row.t)
+            tr["ts"] = float(row.t); changed = True
             long_ = tr["side"] == "LONG"
-            hit_sl = row.l <= tr["sl"] if long_ else row.h >= tr["sl"]
+            # T1 hit ke baad (agar setting ON hai) bacha hissa entry par SL
+            cur_sl = tr["entry"] if (tr["t1_hit"] and MOVE_SL_TO_ENTRY_AFTER_T1) else tr["sl"]
+            hit_sl = row.l <= cur_sl if long_ else row.h >= cur_sl
             hit_t1 = row.h >= tr["t1"] if long_ else row.l <= tr["t1"]
             hit_t2 = row.h >= tr["t2"] if long_ else row.l <= tr["t2"]
             if hit_sl:                                  # conservative: ek hi candle me dono to SL pehle maana
                 if tr["t1_hit"]:
-                    tally["T1_then_SL"] += 1
-                    msg = f"⚠️ {tr['pair']} {tr['side']}: T1 hit hua tha, phir SL aaya."
+                    res = record_result(tr, "T1_SL", exit2=cur_sl)
+                    msg = f"⚠️ {tr['pair']} {tr['side']}: T1 hit hua tha, phir SL ({fp(cur_sl)}) aaya."
                 else:
-                    tally["SL"] += 1
+                    res = record_result(tr, "SL")
                     msg = f"❌ {tr['pair']} {tr['side']}: SL hit ({fp(tr['sl'])})."
                 done = True
             elif hit_t2:
-                tally["T2"] += 1
+                res = record_result(tr, "T2")
                 msg = f"✅ {tr['pair']} {tr['side']}: T2 hit ({fp(tr['t2'])})."
                 done = True
             elif hit_t1 and not tr["t1_hit"]:
                 tr["t1_hit"] = True
-                tg_text(f"🎯 {tr['pair']} {tr['side']}: T1 hit ({fp(tr['t1'])}).")
+                locked = T1_BOOK * _r_at(tr["side"], tr["entry"], tr["sl"], tr["t1"])
+                sl_note = "bacha hissa SL entry par" if MOVE_SL_TO_ENTRY_AFTER_T1 else "SL wahi rahega"
+                tg_text(f"🎯 {tr['pair']} {tr['side']}: T1 hit ({fp(tr['t1'])}).\n"
+                        f"{int(T1_BOOK * 100)}% book = {locked:+.2f}R = {money(locked * RISK_USDT)} locked; {sl_note}.")
             if done:
-                tg_text(msg + "\n" + tally_text())
+                tg_text(f"{msg}\n{pnl_line(res)}\n\n{summary_text()}")
                 active.remove(tr)
                 break
+    if changed: save_active()
 
 # ================= SCAN LOOP =================
 def get_pairs():
@@ -563,9 +672,10 @@ def scan():
 def main():
     if not TG_TOKEN or not TG_CHAT:
         print("ERROR: TG_TOKEN / TG_CHAT_ID secrets set nahi hain"); return
+    active[:] = [t for t in _jload(ACTIVE_FILE) if isinstance(t, dict) and "id" in t]   # pichhle run ke open trades
     end = time.time() + RUN_MINUTES * 60
     tg_text(f"🤖 Chart bot start ({ALERT_TF}, mode={MODE}). Max {MAX_ALERTS_PER_DAY} alerts/day, "
-            f"min quality {MIN_QUALITY}.")
+            f"min quality {MIN_QUALITY}. 1R = ${RISK_USDT:g}. Open trades: {len(active)}")
     while time.time() < end:
         t0 = time.time()
         try: scan()
@@ -573,7 +683,8 @@ def main():
         try: check_trades()
         except Exception: traceback.print_exc()
         time.sleep(max(5, SCAN_EVERY - (time.time() - t0)))
-    tg_text("🛑 Bot run khatam (next run workflow se).\n" + tally_text())
+    save_active()
+    tg_text("🛑 Bot run khatam (next run workflow se).\n" + summary_text())
 def coin_list():
     return get_pairs()
 if __name__ == "__main__":
