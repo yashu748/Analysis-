@@ -59,7 +59,7 @@ ATR_SL = 1.5
 MAX_RISK_PCT = 10.0
 T1_R, T2_R = 1.5, 3.0
 LEV = 30                           # chart par Liq line kis leverage ki
-MIN_QUALITY = 55
+MIN_QUALITY = 65
 REQUIRE_PATTERN = False            # True = same side ka confirmed pattern ya candle pattern zaroori
 BLOCK_OPPOSITE = True              # ulta confirmed pattern ho to alert nahi
 
