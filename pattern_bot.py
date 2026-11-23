@@ -16,6 +16,12 @@ Caption : pair, side, pattern, 24h change, entry/SL/T1/T2, indicators, trend, pa
   * Candlestick pattern (Evening/Morning Star, Engulfing, Hammer, Shooting Star) tabhi jab pehle ka trend ho.
   * Ulta CONFIRMED pattern ho to alert block.
 
+NAYA (add kiya):
+  * FAST TARGET RANKING: ek scan me 2+ signal mile to dono ko dobara check karke rank karta hai
+    (buyers/sellers dabav + volume + T1 kitna paas) - sabse fast upar, caption me "FASTEST PICK".
+  * PAISA FLOW: caption me dikhta hai ki long me kitna paisa laga aur short me kitna
+    (taker volume 4h/24h, accounts long/short %, open interest).
+
 Run:  python pattern_bot.py          (RUN_MINUTES tak loop, har 5 min scan)
 Test: python pattern_bot.py --dry    (Telegram nahi bhejta)
 Secrets: TG_TOKEN, TG_CHAT_ID
@@ -423,6 +429,114 @@ def analyze(pair):
                 df=df, e9=e9, e26=e26, rsi_s=r, q=q, chg24=chg24, vr=vr)
 
 
+# ================= FAST TARGET RANKING (NAYA) =================
+def speed_score(s):
+    df = s["df"]
+    t = df.tail(10)
+    rng = (t.h - t.l).replace(0, np.nan)
+    # candle close kahan hua = buyer/seller pressure ka andaza
+    buy = (t.v * (t.c - t.l) / rng).fillna(t.v * 0.5)
+    tv = float(t.v.sum())
+    bp = float(buy.sum()) / tv if tv > 0 else 0.5
+    pressure = bp if s["side"] == "LONG" else 1 - bp
+
+    base = df.v.iloc[-23:-3].mean()
+    vtrend = float(df.v.tail(3).mean() / base) if base > 0 else 0
+    atr = float(b.atr(df).iloc[-1])
+    dist = abs(s["t1"] - s["price"]) / atr            # T1 kitne ATR door
+
+    p_n = min(1, max(0, (pressure - 0.4) / 0.3))
+    v_n = min(1, max(0, (0.5 * s["vr"] + 0.5 * vtrend) / 3))
+    d_n = min(1, max(0, 1 - (dist - 1) / 3))
+    score = round(45 * p_n + 30 * v_n + 25 * d_n, 1)
+    return dict(score=score, pressure=pressure, vtrend=vtrend, dist=dist)
+
+
+def pick_fastest(sigs):
+    """2+ signals mile to unhe rank karo, sabse fast upar."""
+    for s in sigs:
+        s["speed"] = speed_score(s)
+        s["fast"] = False
+    sigs.sort(key=lambda s: -s["speed"]["score"])
+    if len(sigs) >= 2:
+        sigs[0]["fast"] = True
+    return sigs
+
+
+def speed_line(s):
+    sp = s["speed"]
+    tag = "\u26a1 FASTEST PICK" if s.get("fast") else "Slow pick"
+    who = "Buyers" if s["side"] == "LONG" else "Sellers"
+    return (f"{tag} | Speed {sp['score']}/100\n"
+            f"{who} dabav {sp['pressure'] * 100:.0f}% | Vol {s['vr']:.1f}x (trend {sp['vtrend']:.1f}x) | "
+            f"T1 {sp['dist']:.1f} ATR door")
+
+
+# ================= LONG / SHORT PAISA FLOW (NAYA) =================
+FAPI = "https://fapi.binance.com"
+
+
+def money(x):
+    for d, u in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(x) >= d:
+            return f"${x / d:.1f}{u}"
+    return f"${x:.0f}"
+
+
+def ls_data(pair):
+    """Binance futures ka public data. Fail ho to None (alert phir bhi jayega)."""
+    try:
+        k = requests.get(f"{FAPI}/fapi/v1/klines",
+                         params={"symbol": pair, "interval": "1h", "limit": 24}, timeout=10).json()
+        tot = [float(x[7]) for x in k]          # total quote volume (USDT)
+        buy = [float(x[10]) for x in k]         # taker buy quote volume
+        sell = [t_ - b_ for t_, b_ in zip(tot, buy)]
+        out = dict(b4=sum(buy[-4:]), s4=sum(sell[-4:]), b24=sum(buy), s24=sum(sell))
+        try:
+            g = requests.get(f"{FAPI}/futures/data/globalLongShortAccountRatio",
+                             params={"symbol": pair, "period": "1h", "limit": 1}, timeout=10).json()[0]
+            out["acc_l"], out["acc_s"] = float(g["longAccount"]), float(g["shortAccount"])
+        except Exception:
+            pass
+        try:
+            oi = requests.get(f"{FAPI}/futures/data/openInterestHist",
+                              params={"symbol": pair, "period": "1h", "limit": 5}, timeout=10).json()
+            out["oi"] = float(oi[-1]["sumOpenInterestValue"])
+            out["oi_chg"] = (float(oi[-1]["sumOpenInterestValue"]) / float(oi[0]["sumOpenInterestValue"]) - 1) * 100
+        except Exception:
+            pass
+        return out
+    except Exception:
+        return None
+
+
+def ls_text(s):
+    d = s.get("ls")
+    if not d:
+        return []
+
+    def row(lbl, bu, se):
+        t_ = bu + se
+        if t_ <= 0:
+            return None
+        return f"{lbl}: LONG {money(bu)} ({bu / t_ * 100:.0f}%)  |  SHORT {money(se)} ({se / t_ * 100:.0f}%)"
+    lines = ["", "\U0001f4b0 PAISA FLOW (long vs short):"]
+    for lbl, bu, se in (("4h", d["b4"], d["s4"]), ("24h", d["b24"], d["s24"])):
+        r_ = row(lbl, bu, se)
+        if r_:
+            lines.append(r_)
+    if "acc_l" in d:
+        lines.append(f"Accounts: Long {d['acc_l'] * 100:.0f}% / Short {d['acc_s'] * 100:.0f}%")
+    if "oi" in d:
+        lines.append(f"Open Interest {money(d['oi'])} ({d['oi_chg']:+.1f}% 4h)")
+    t4 = d["b4"] + d["s4"]
+    if t4 > 0:
+        win = "LONG" if d["b4"] / t4 >= 0.5 else "SHORT"
+        agree = "trade ke saath \u2705" if win == s["side"] else "trade ke KHILAF \u26a0\ufe0f"
+        lines.append(f"Verdict: {win} side me paisa zyada = {agree}")
+    return lines
+
+
 # ================= CHART =================
 def make_chart(s):
     df = s["df"]
@@ -517,6 +631,10 @@ def caption(s):
             t.append(f"{dot} {p['name']} - tgt {b.fp(p['target'])} ({p['age']} candle pehle break)")
     if s["cands"]:
         t += ["", "\U0001f56f Candle: " + ", ".join(f"{nm}" for _, nm, _ in s["cands"])]
+    # NAYA: fast target ranking (sirf jab 2+ signal mile) + paisa flow
+    if s.get("speed") and s.get("ranked"):
+        t += ["", speed_line(s)]
+    t += ls_text(s)
     liq_before_sl = (s["side"] == "SHORT" and s["liq"] < s["sl"]) or (s["side"] == "LONG" and s["liq"] > s["sl"])
     t += ["", f"Leverage: SL se pehle liquidation na ho isliye max ~{maxlev}x."]
     if liq_before_sl:
@@ -585,6 +703,14 @@ def scan():
     with ThreadPoolExecutor(6) as ex:
         res = [s for s in ex.map(work, pairs) if s]
     res.sort(key=lambda s: s["q"], reverse=True)
+    # NAYA: 2+ signal mile to dono ko dobara check karke fastest upar karo
+    if len(res) >= 2:
+        try:
+            res = pick_fastest(res)
+            for s in res:
+                s["ranked"] = True
+        except Exception:
+            traceback.print_exc()
     now = time.time()
     day_alerts[:] = [t for t in day_alerts if now - t < 24 * 3600]
     room = max(0, MAX_ALERTS_PER_DAY - len(day_alerts))
@@ -592,6 +718,7 @@ def scan():
         stats["daily limit poori"] = len(res)
     sent = 0
     for s in res[:min(MAX_ALERTS_PER_SCAN, room)]:
+        s["ls"] = ls_data(s["pair"])            # NAYA: long/short paisa flow
         last_alert[(s["pair"], s["side"])] = now
         day_alerts.append(now)
         send(s)
