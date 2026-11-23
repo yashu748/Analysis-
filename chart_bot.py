@@ -42,7 +42,7 @@ VOL_MAX = 10.0                                     # isse bada volume = blow-off
 REQUIRE_PATTERN = True                             # True = pattern bhi zaroori (bahut kam alert)
 MAX_ALERTS_PER_SCAN = 2                            # ek scan mein sirf top alerts
 MAX_ALERTS_PER_DAY = 6                             # 24 ghante me maximum itne alert
-MIN_QUALITY = 65                                   # quality score (0-100) isse kam ho to alert nahi
+MIN_QUALITY = 70                                   # quality score (0-100) isse kam ho to alert nahi
 BTC_FILTER = True                                  # BTC 1h trend against ho to altcoin alert nahi
 TRACK_RESULTS = True                               # har alert ka SL/T1/T2 result Telegram par bhejo
 TRACK_EXPIRE_H = 48                                # itne ghante me kuch na ho to result "expired"
