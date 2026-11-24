@@ -1,27 +1,51 @@
+
 name: smc-15m-alert
+
 on:
   schedule:
     - cron: "*/15 * * * *"
+
   workflow_dispatch:
     inputs:
       test:
         description: "Telegram test message bhejna hai? (yes/no)"
+        required: false
         default: "no"
+        type: choice
+        options:
+          - "no"
+          - "yes"
+
 jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install pandas numpy requests matplotlib
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests matplotlib
+
       - name: Run SMC scan
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           INTERVAL: "15m"
           PAIRS: "BTC_USDT,ETH_USDT,SOL_USDT"
+
         run: |
-          if [ "${{ github.event.inputs.test }}" = "yes" ]; then python smc_alert.py test; else python smc_alert.py; fi
+          if [ "${{ inputs.test }}" = "yes" ]; then
+            python smc_alert.py test
+          else
+            python smc_alert.py
+          fi
+          
