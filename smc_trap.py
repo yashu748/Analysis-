@@ -1,5 +1,5 @@
 """
-SMC "Smart Money ka Trap" strategy  (5-min timeframe)  -- tans_view reel
+SMC "Smart Money ka Trap" strategy  (15-min timeframe)  -- tans_view reel
 
 Reel ka idea (retail ko trap karna):
   1. Price trendline ko 3 baar touch karta hai -> retail 3rd touch par BUY karta hai,
@@ -7,14 +7,9 @@ Reel ka idea (retail ko trap karna):
   2. Smart money price ko trendline ke NEECHE le jaakar wo SL hit karta hai (liquidity sweep).
   3. Phir price tezi se wapas upar jaakar pichhla high todta hai (structure break).
   4. Jahan se reversal shuru hua wo DEMAND zone hai -> price zone me wapas aaye to BUY.
-     SL = zone ke neeche, target = RR x risk.
+     SL = zone ke neeche, target = upar ki liquidity (structure break ke baad ka high).
   5. SELL side bilkul ulta (descending trendline, supply zone). Code SELL ke liye
      price ko ulta (invert) karke wahi BUY logic chalata hai.
-
-Chalane ke tarike:
-  python smc_trap.py demo              # banaye hue data par test
-  python smc_trap.py data.csv          # CSV: datetime,open,high,low,close (5-min)
-  python smc_trap.py gate BTC_USDT     # Gate.io public API se 5m candles (login nahi chahiye)
 
 Bot me use karne ke liye:  from smc_trap import load_gate, latest_signal
 """
@@ -35,8 +30,8 @@ class P:
     wait_mss: int = 40        # sweep ke baad structure break ka intezaar
     wait_retest: int = 40     # structure break ke baad zone retest ka intezaar
     sl_atr: float = 0.10      # SL buffer (x ATR)
-    rr: float = 2.0           # target = rr x risk
-    max_hold: int = 60        # trade max kitni candles tak chalega
+    min_rr: float = 2.0       # target kam se kam itna x risk ho, warna trade skip
+    max_hold: int = 96        # trade max kitni candles tak chalega
     atr_len: int = 14
 
 
@@ -52,9 +47,7 @@ def invert(df):
     """Price ko ulta kar do: BUY logic se SELL setups mil jate hain."""
     return pd.DataFrame({"open": -df["open"], "high": -df["low"],
                          "low": -df["high"], "close": -df["close"]}, index=df.index)
-
-
-def find_long(df, p):
+  def find_long(df, p):
     """BUY setups dhundta hai. Return: (setups, pending_zone_ya_None)."""
     o, h, l, c = (df[x].to_numpy(float) for x in ("open", "high", "low", "close"))
     atr = atr_series(df, p.atr_len).to_numpy()
@@ -78,7 +71,7 @@ def find_long(df, p):
                     mid_ok = abs(l[b] - (l[a] + slope * (b - a))) <= tol
                     respected = all(l[x] >= l[a] + slope * (x - a) - tol for x in range(a, t + 1))
                     if mid_ok and respected:
-                        st = dict(stage="sweep", a=a, slope=slope, t3=c3)
+                        st = dict(stage="sweep", a=a, b=b, base=l[a], slope=slope, t3=c3)
             continue
 
         line_t = l[st["a"]] + st["slope"] * (t - st["a"])
@@ -110,18 +103,19 @@ def find_long(df, p):
             elif l[t] <= st["zh"]:
                 entry = min(st["zh"], o[t])
                 sl = st["zl"] - p.sl_atr * atr[t]
-                if entry > sl:
-                    setups.append(dict(entry_idx=t, entry=entry, sl=sl,
-                                       tp=entry + p.rr * (entry - sl),
+                tp = h[st["mss_idx"]:t + 1].max()       # upar ki liquidity = rally ka high
+                if entry > sl and tp - entry >= p.min_rr * (entry - sl):
+                    setups.append(dict(entry_idx=t, entry=entry, sl=sl, tp=tp,
                                        zl=st["zl"], zh=st["zh"],
-                                       sweep_idx=st["sweep_idx"], mss_idx=st["mss_idx"]))
+                                       sweep_idx=st["sweep_idx"], mss_idx=st["mss_idx"],
+                                       a=st["a"], b=st["b"], t3=st["t3"], base=st["base"],
+                                       slope=st["slope"], struct_hi=st["struct_hi"],
+                                       low_idx=st["low_idx"]))
                 st = None
 
     pending = st if st is not None and st["stage"] == "retest" else None
     return setups, pending
-
-
-def simulate(df, s, p):
+    def simulate(df, s, p):
     """Entry ke baad SL/TP check. Ek hi candle me dono lage to SL pehle maana (conservative)."""
     h, l, c = df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy()
     n, i0 = len(df), s["entry_idx"]
@@ -159,14 +153,13 @@ def latest_signal(df, p=P()):
         for s in setups:
             if s["entry_idx"] == n - 1:
                 out.append(dict(kind="SIGNAL", side=side, time=df.index[-1],
-                                entry=sg * s["entry"], sl=sg * s["sl"], tp=sg * s["tp"]))
+                                entry=sg * s["entry"], sl=sg * s["sl"], tp=sg * s["tp"],
+                                detail=s, sg=sg))
         if pend:
             lo, hi = sorted((sg * pend["zl"], sg * pend["zh"]))
             out.append(dict(kind="WATCH", side=side, zone_low=lo, zone_high=hi))
     return out
-
-
-# ---------------- data loaders ----------------
+  # ---------------- data loaders ----------------
 def load_csv(path):
     df = pd.read_csv(path)
     df.columns = [x.lower().strip() for x in df.columns]
@@ -175,7 +168,7 @@ def load_csv(path):
     return df[["open", "high", "low", "close"]].astype(float).sort_index()
 
 
-def load_gate(pair="BTC_USDT", interval="5m", limit=1000):
+def load_gate(pair="BTC_USDT", interval="15m", limit=1000):
     import requests
     r = requests.get("https://api.gateio.ws/api/v4/spot/candlesticks",
                      params=dict(currency_pair=pair, interval=interval, limit=limit), timeout=20)
@@ -196,7 +189,7 @@ def demo_df(seed=3):
     o = np.r_[c[0], c[:-1]]
     h = np.maximum(o, c) + rng.uniform(0, 0.15, len(x))
     l = np.minimum(o, c) - rng.uniform(0, 0.15, len(x))
-    idx = pd.date_range("2026-11-24 09:15", periods=len(x), freq="5min")
+    idx = pd.date_range("2026-11-24 09:15", periods=len(x), freq="15min")
     return pd.DataFrame({"open": o, "high": h, "low": l, "close": c}, index=idx)
 
 
